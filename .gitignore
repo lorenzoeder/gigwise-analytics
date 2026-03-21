@@ -1,5 +1,7 @@
 .devcontainer/
 .context/
+.config/
+docs/first*
 
 # Data
 *.parquet
@@ -10,6 +12,7 @@ data/
 # GCP
 google-cloud-sdk/
 *key.json
+.keys/
 
 # Terraform
 *.tfstate
