@@ -10,6 +10,7 @@ google-cloud-sdk/
 module_03_data_warehouse/tip_model/
 *.db
 *.duckdb
+.context/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
