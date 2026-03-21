@@ -1,3 +1,3 @@
-# Festival Analytics
+# Gigwise Analytics
 
-Festival Analytics: Project submission for Data Engineering Zoomcamp 2026
+Gigwise Analytics: Project submission for Data Engineering Zoomcamp 2026
