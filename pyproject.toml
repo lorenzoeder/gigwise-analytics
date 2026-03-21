@@ -1,5 +1,5 @@
 [project]
-name = "festival-analytics"
+name = "gigwise-analytics"
 version = "0.1.0"
 description = "venv for DE Zoomcamp 2026 project"
 readme = "README.md"
