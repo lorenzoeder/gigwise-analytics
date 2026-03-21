@@ -1,0 +1,21 @@
+[project]
+name = "festival-analytics"
+version = "0.1.0"
+description = "venv for DE Zoomcamp 2026 project"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "altair>=6.0.0",
+    "dbt-core>=1.11.6",
+    "dbt-duckdb>=1.10.1",
+    "dlt[duckdb,workspace]>=1.22.1",
+    "duckdb>=1.4.4",
+    "ibis-framework[duckdb]>=12.0.0",
+    "ipykernel>=7.2.0",
+    "kafka-python>=2.3.0",
+    "marimo>=0.20.2",
+    "numpy>=2.4.2",
+    "pandas>=3.0.1",
+    "psycopg2-binary>=2.9.11",
+    "pyarrow>=23.0.1",
+]
