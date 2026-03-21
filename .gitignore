@@ -1,16 +1,22 @@
+.devcontainer/
+.context/
+
+# Data
 *.parquet
+*.db
+*.duckdb
+data/
+
+# GCP
+google-cloud-sdk/
 *key.json
-*.tf
+
+# Terraform
 *.tfstate
 *.tfstate.backup
 *.terraform.lock.hcl
 .terraform/
-.devcontainer/
-google-cloud-sdk/
-module_03_data_warehouse/tip_model/
-*.db
-*.duckdb
-.context/
+terraform.tfvars*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -149,9 +155,9 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
-.envrc
-.venv
+.env*
+.envrc*
+.venv*
 env/
 venv/
 ENV/
