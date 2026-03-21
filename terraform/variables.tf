@@ -32,3 +32,9 @@ variable "create_pipeline_sa" {
   type        = bool
   default     = true
 }
+
+variable "existing_pipeline_sa_email" {
+  description = "Use an existing service account email instead of creating one"
+  type        = string
+  default     = ""
+}

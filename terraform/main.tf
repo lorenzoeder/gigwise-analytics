@@ -1,5 +1,6 @@
 locals {
-  lake_bucket_name = "gigwise-analytics-${var.environment}-${var.gcp_project_id}"
+  lake_bucket_name       = "gigwise-analytics-${var.environment}-${var.gcp_project_id}"
+  pipeline_service_email = var.existing_pipeline_sa_email != "" ? var.existing_pipeline_sa_email : (var.create_pipeline_sa ? google_service_account.pipeline[0].email : null)
 }
 
 resource "google_storage_bucket" "data_lake" {
@@ -20,7 +21,7 @@ resource "google_bigquery_dataset" "datasets" {
 }
 
 resource "google_service_account" "pipeline" {
-  count        = var.create_pipeline_sa ? 1 : 0
+  count        = var.create_pipeline_sa && var.existing_pipeline_sa_email == "" ? 1 : 0
   account_id   = "gigwise-pipeline-${var.environment}"
   display_name = "Gigwise pipeline service account (${var.environment})"
 }

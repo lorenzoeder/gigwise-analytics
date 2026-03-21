@@ -9,6 +9,6 @@ output "bigquery_datasets" {
 }
 
 output "pipeline_service_account_email" {
-  value       = var.create_pipeline_sa ? google_service_account.pipeline[0].email : null
+  value       = local.pipeline_service_email
   description = "Service account email for pipeline execution"
 }
