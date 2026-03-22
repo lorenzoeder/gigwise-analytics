@@ -717,6 +717,7 @@ dependencies = [
     { name = "dlt", extra = ["duckdb", "workspace"] },
     { name = "duckdb" },
     { name = "google-cloud-bigquery" },
+    { name = "google-cloud-bigquery-storage" },
     { name = "google-cloud-storage" },
     { name = "ibis-framework", extra = ["duckdb"] },
     { name = "ipykernel" },
@@ -738,6 +739,7 @@ requires-dist = [
     { name = "dlt", extras = ["duckdb", "workspace"], specifier = ">=1.22.1" },
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "google-cloud-bigquery", specifier = ">=3.40.1" },
+    { name = "google-cloud-bigquery-storage", specifier = ">=2.33.1" },
     { name = "google-cloud-storage", specifier = ">=3.1.1" },
     { name = "ibis-framework", extras = ["duckdb"], specifier = ">=12.0.0" },
     { name = "ipykernel", specifier = ">=7.2.0" },
@@ -884,6 +886,22 @@ pandas = [
     { name = "pandas" },
     { name = "pandas-gbq" },
     { name = "pyarrow" },
+]
+
+[[package]]
+name = "google-cloud-bigquery-storage"
+version = "2.36.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e0/fa/877e0059349369be38a64586b135c59ceadb87d0386084043d8c440ef929/google_cloud_bigquery_storage-2.36.2.tar.gz", hash = "sha256:ad49d8c09ad6cd82da4efe596fcfcdbc1458bf05b93915e3c5c00f1e700ae128", size = 308672, upload-time = "2026-02-19T16:03:10.544Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1f/07/62dbe78ef773569be0a1d2c1b845e9214889b404e506126519b4d33ee999/google_cloud_bigquery_storage-2.36.2-py3-none-any.whl", hash = "sha256:823a73db0c4564e8ad3eedcfd5049f3d5aa41775267863b5627211ec36be2dbf", size = 304398, upload-time = "2026-02-19T16:02:55.112Z" },
 ]
 
 [[package]]

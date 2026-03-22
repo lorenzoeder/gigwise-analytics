@@ -19,7 +19,7 @@ This project builds an end-to-end data pipeline that ingests concert and setlist
 |---|---|
 | Problem description | This README defines the analytical problem and business questions clearly |
 | Cloud | GCP (GCS + BigQuery), provisioned with Terraform |
-| Data ingestion | Batch pipeline orchestrated with Kestra running Bruin assets |
+| Data ingestion | Unified dlt ingestion orchestrated with Bruin and Kestra |
 | Data warehouse | BigQuery star schema with partitioning and clustering strategy |
 | Transformations | dbt staging, core, and marts |
 | Dashboard | Streamlit dashboard with at least 2 meaningful tiles |
@@ -30,7 +30,8 @@ This project builds an end-to-end data pipeline that ingests concert and setlist
 The stack is intentionally aligned with course modules while using pragmatic additions.
 
 - Terraform: IaC for reproducible GCP setup
-- Bruin: unified ingestion/staging execution (uses ingestr/dlt under the hood)
+- dlt: unified ingestion layer for Ticketmaster, Setlist.fm, MusicBrainz, and Spotify
+- Bruin: orchestration and SQL/quality execution layer
 - Kestra: outer orchestration and scheduling
 - BigQuery: analytical warehouse
 - dbt Core: modeled transformations and tests
@@ -54,13 +55,15 @@ Important design rule: MBID is the canonical cross-source key. Artist-name joins
 
 ```mermaid
 flowchart LR
-	TM[Ticketmaster API] --> BR[Bruin Ingestion Assets]
-	SL[Setlist.fm API] --> BR
-	SP[Spotify API] --> BR
-	MB[MusicBrainz API] --> BR
+	TM[Ticketmaster API] --> DLT[dlt Ingestion Pipeline]
+	SL[Setlist.fm API] --> DLT
+	SP[Spotify API] --> DLT
+	MB[MusicBrainz API] --> DLT
 
-	BR --> GCS[(GCS Data Lake: raw/staging)]
-	GCS --> BQRAW[(BigQuery raw/staging)]
+	DLT --> BQRAW[(BigQuery raw)]
+
+	BR[Bruin Orchestration + SQL Assets] --> BQRAW
+	GCS[(GCS Data Lake: raw/staging)] --> BQRAW
 	BQRAW --> DBT[dbt Core Models]
 	DBT --> BQANA[(BigQuery analytics marts)]
 	BQANA --> ST[Streamlit Dashboard]
@@ -87,12 +90,14 @@ gigwise-analytics/
 │   ├── main.tf
 │   └── outputs.tf
 ├── bruin_pipeline/
-│   ├── .bruin.yml
 │   ├── pipeline.yml
 │   └── assets/
 │       ├── ingestion/
 │       ├── staging/
 │       └── quality/
+├── dlt_pipeline/
+│   ├── ingest_pipeline.py
+│   └── README.md
 ├── kestra/
 │   └── flows/
 ├── spark_jobs/
@@ -202,9 +207,13 @@ Local service ports:
 ### Step 5: Run ingestion and transformations
 
 ```bash
+make run-dlt-snapshots-dry
+make run-dlt-snapshots
 make run-bruin
 make run-dbt
 ```
+
+`run-dlt-snapshots-dry` validates extraction without loading. `run-dlt-snapshots` loads all API ingestion tables to BigQuery raw. `run-bruin` then executes orchestration/validation assets.
 
 ### Step 6: Run dashboard
 

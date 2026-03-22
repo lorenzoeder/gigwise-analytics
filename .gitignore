@@ -21,6 +21,9 @@ google-cloud-sdk/
 .terraform/
 terraform.tfvars*
 
+# dbt
+dbt_concert/.user.yml
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -228,3 +231,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+.bruin.yml
+logs/runs
+logs/*.log
+*.py[cod]

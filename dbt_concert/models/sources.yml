@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: ticketmaster_events
+      - name: setlistfm_setlists
+      - name: spotify_artists
+      - name: musicbrainz_artists
