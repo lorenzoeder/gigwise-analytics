@@ -2,6 +2,7 @@
 .context/
 .config/
 docs/first*
+docs/personal_ops_guide.md
 
 # Data
 *.parquet

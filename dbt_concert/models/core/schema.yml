@@ -15,7 +15,3 @@ models:
       - name: event_date
         tests:
           - not_null
-
-  - name: fact_artist_snapshot
-    columns:
-      - name: spotify_popularity

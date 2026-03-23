@@ -3,7 +3,7 @@ MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 ROOT_DIR := $(dir $(MAKEFILE_PATH))
 DBT_BUILD_FLAGS ?= --full-refresh --fail-fast
 
-.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra run-dlt-snapshots run-dlt-snapshots-dry run-bruin run-bruin-dry run-dbt run-dbt-debug run-dashboard run-dashboard-detached run-dashboard-logs stop-dashboard run-spark run-kafka test lint fmt
+.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug run-dashboard run-dashboard-logs stop-dashboard run-spark run-kafka test lint fmt
 
 help:
 	@echo "Available targets:"
@@ -12,14 +12,13 @@ help:
 	@echo "  bruin-check     Verify Bruin CLI is installed"
 	@echo "  setup-infra     Initialize and apply Terraform"
 	@echo "  destroy-infra   Destroy Terraform-managed infrastructure"
-	@echo "  run-dlt-snapshots      Load Ticketmaster/Setlist.fm/MusicBrainz/Spotify via dlt"
-	@echo "  run-dlt-snapshots-dry  Fetch all ingestion sources (no load)"
+	@echo "  run-dlt         Load Ticketmaster/Setlist.fm/MusicBrainz via dlt"
+	@echo "  run-dlt-dry     Fetch all ingestion sources (no load)"
 	@echo "  run-bruin       Run Bruin orchestration assets (includes dlt ingestion task)"
 	@echo "  run-bruin-dry   Validate Bruin pipeline only (no ingestion)"
 	@echo "  run-dbt-debug   Validate dbt profile/connection"
 	@echo "  run-dbt         Run dbt models and tests"
-	@echo "  run-dashboard   Start Streamlit dashboard"
-	@echo "  run-dashboard-detached Start Streamlit in background (logs to logs/dashboard.log)"
+	@echo "  run-dashboard   Start Streamlit dashboard (background, logs to logs/dashboard.log)"
 	@echo "  run-dashboard-logs     Tail Streamlit dashboard logs"
 	@echo "  stop-dashboard         Stop background Streamlit process"
 	@echo "  run-spark       Execute Spark join job in container"
@@ -50,10 +49,10 @@ destroy-infra:
 	$(MAKE) -f $(MAKEFILE_PATH) gcp-auth-check
 	cd $(ROOT_DIR)terraform && terraform destroy -auto-approve -var "gcp_project_id=$$GCP_PROJECT_ID" -var "gcp_region=$$GCP_REGION" -var "existing_pipeline_sa_email=$${EXISTING_PIPELINE_SA_EMAIL:-}"
 
-run-dlt-snapshots:
+run-dlt:
 	cd $(ROOT_DIR) && set -a && source .env && set +a && PYTHONUNBUFFERED=1 uv run python $(ROOT_DIR)dlt_pipeline/ingest_pipeline.py
 
-run-dlt-snapshots-dry:
+run-dlt-dry:
 	cd $(ROOT_DIR) && set -a && source .env && set +a && PYTHONUNBUFFERED=1 uv run python $(ROOT_DIR)dlt_pipeline/ingest_pipeline.py --dry-run
 
 run-bruin:
@@ -72,21 +71,25 @@ run-dbt:
 	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt_concert && uv run dbt deps && uv run dbt build --target prod $(DBT_BUILD_FLAGS)
 
 run-dashboard:
-	cd $(ROOT_DIR) && set -a && source .env && set +a && STREAMLIT_BROWSER_GATHER_USAGE_STATS=false uv run streamlit run dashboard/streamlit_app.py
-
-run-dashboard-detached:
 	cd $(ROOT_DIR) && mkdir -p logs && set -a && source .env && set +a && \
-	STREAMLIT_BROWSER_GATHER_USAGE_STATS=false nohup uv run streamlit run dashboard/streamlit_app.py > logs/dashboard.log 2>&1 & echo $$! > logs/dashboard.pid && \
-	echo "Started Streamlit in background with PID $$(cat logs/dashboard.pid)" && \
+	STREAMLIT_BROWSER_GATHER_USAGE_STATS=false nohup uv run streamlit run dashboard/streamlit_app.py > logs/dashboard.log 2>&1 & \
+	DASH_PID=$$!; echo "$$DASH_PID" > logs/dashboard.pid; \
+	echo "Started Streamlit in background (PID $$DASH_PID)"; \
 	echo "Logs: $(ROOT_DIR)logs/dashboard.log"
 
 run-dashboard-logs:
-	cd $(ROOT_DIR) && test -f logs/dashboard.log || (echo "No dashboard log found. Start with make run-dashboard-detached" && exit 1)
+	cd $(ROOT_DIR) && test -f logs/dashboard.log || (echo "No dashboard log found. Start with make run-dashboard" && exit 1)
 	cd $(ROOT_DIR) && tail -f logs/dashboard.log
 
 stop-dashboard:
-	cd $(ROOT_DIR) && test -f logs/dashboard.pid || (echo "No dashboard PID file found." && exit 1)
-	cd $(ROOT_DIR) && kill $$(cat logs/dashboard.pid) && rm -f logs/dashboard.pid && echo "Stopped Streamlit dashboard"
+	@cd $(ROOT_DIR) && \
+	if pgrep -f "[s]treamlit run dashboard" > /dev/null 2>&1; then \
+		pkill -f "[s]treamlit run dashboard" 2>/dev/null; \
+		rm -f logs/dashboard.pid; \
+		echo "Stopped Streamlit dashboard"; \
+	else \
+		echo "No running Streamlit dashboard found"; \
+	fi
 
 run-spark:
 	@test -n "$$DATA_LAKE_BUCKET" || (echo "Missing DATA_LAKE_BUCKET" && exit 1)

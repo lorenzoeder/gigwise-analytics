@@ -7,11 +7,10 @@ Data Engineering Zoomcamp 2026 capstone project by Lorenzo Ederone.
 Concert-goers, journalists, and music industry analysts do not have a unified way to answer core touring questions:
 
 - Which artists tour most intensively across countries?
-- How do setlists evolve over time?
-- How does live touring activity relate to Spotify popularity?
-- How do ticket prices vary by artist profile and geography?
+- What genres dominate the live touring landscape?
+- How do setlists evolve over time — how many unique songs does each artist play per year?
 
-This project builds an end-to-end data pipeline that ingests concert and setlist data from multiple APIs, stores raw data in a data lake, transforms it in BigQuery with dbt, and exposes analytics through a Streamlit dashboard.
+This project builds an end-to-end data pipeline that ingests concert and setlist data from multiple APIs, stores raw data in BigQuery, transforms it with dbt, and exposes analytics through a Streamlit dashboard.
 
 ## 2. Zoomcamp Evaluation Mapping
 
@@ -19,61 +18,58 @@ This project builds an end-to-end data pipeline that ingests concert and setlist
 |---|---|
 | Problem description | This README defines the analytical problem and business questions clearly |
 | Cloud | GCP (GCS + BigQuery), provisioned with Terraform |
-| Data ingestion | Unified dlt ingestion orchestrated with Bruin and Kestra |
+| Data ingestion | dlt API ingestion orchestrated by Bruin (DAG: ingestion → staging SQL → quality checks), scheduled by Kestra |
 | Data warehouse | BigQuery star schema with partitioning and clustering strategy |
-| Transformations | dbt staging, core, and marts |
-| Dashboard | Streamlit dashboard with at least 2 meaningful tiles |
+| Transformations | dbt staging, intermediate, core, and marts layers |
+| Dashboard | Streamlit dashboard with 2 meaningful tiles |
 | Reproducibility | Docker Compose, Makefile, env template, and step-by-step setup |
+| Batch processing | Spark job for batch join of raw sources from GCS |
+| Streaming | Kafka (Redpanda) broker + consumer for real-time event ingestion demo |
 
 ## 3. Why These Tools
 
 The stack is intentionally aligned with course modules while using pragmatic additions.
 
 - Terraform: IaC for reproducible GCP setup
-- dlt: unified ingestion layer for Ticketmaster, Setlist.fm, MusicBrainz, and Spotify
+- dlt: unified ingestion layer for Ticketmaster, Setlist.fm, and MusicBrainz
 - Bruin: orchestration and SQL/quality execution layer
 - Kestra: outer orchestration and scheduling
 - BigQuery: analytical warehouse
 - dbt Core: modeled transformations and tests
 - Streamlit: easy, shareable dashboard implementation
-- Spark (optional batch enhancement): multi-source joins at parquet stage
-- Kafka (optional streaming enhancement): ticket status updates
 
 If a tool was not deeply covered in the core lectures (for example Bruin), it is documented in this repository so reviewers can understand its role.
 
 ## 4. Data Sources
 
-- Ticketmaster Discovery API: events, venues, ticketing status, price ranges
-- Setlist.fm API: historical setlists, songs, encores
-- Spotify Web API: popularity snapshots, followers, genres
-- MusicBrainz API: canonical artist metadata and MBID join key
-- OpenMeteo (optional): weather enrichment for event context
+- Ticketmaster Discovery API: upcoming events across US, CA, GB, DE, IT markets (1 year forward window)
+- Setlist.fm API: historical setlists with song-level detail (year 2000 onward)
+- MusicBrainz API: canonical artist metadata, MBID join key, and genre tags (with persistent GCS-backed cache)
 
-Important design rule: MBID is the canonical cross-source key. Artist-name joins are not reliable.
+Important design rules:
+- MBID is the canonical cross-source key. Artist-name joins are not reliable.
+- Genre is sourced from MusicBrainz crowd-sourced tags.
+- Ticket prices are out of scope (Ticketmaster GB market does not expose prices via API).
 
 ## 5. High-Level Architecture
 
 ```mermaid
 flowchart LR
-	TM[Ticketmaster API] --> DLT[dlt Ingestion Pipeline]
+	TM[Ticketmaster API] --> DLT[dlt Ingestion]
 	SL[Setlist.fm API] --> DLT
-	SP[Spotify API] --> DLT
 	MB[MusicBrainz API] --> DLT
 
-	DLT --> BQRAW[(BigQuery raw)]
+	subgraph Bruin[Bruin Orchestration]
+		DLT --> BQRAW[(BigQuery raw)]
+		BQRAW --> SQL[SQL Staging + Quality]
+	end
 
-	BR[Bruin Orchestration + SQL Assets] --> BQRAW
-	GCS[(GCS Data Lake: raw/staging)] --> BQRAW
 	BQRAW --> DBT[dbt Core Models]
-	DBT --> BQANA[(BigQuery analytics marts)]
+	DBT --> BQANA[(BigQuery analytics)]
 	BQANA --> ST[Streamlit Dashboard]
 
-	KE[Kestra Scheduler] --> BR
+	KE[Kestra Scheduler] --> Bruin
 	KE --> DBT
-
-	TM -->|optional near-real-time polling| KP[Kafka Producer]
-	KP --> KQ[(Kafka Topic)] --> KC[Kafka Consumer]
-	KC --> BQSTR[(BigQuery streaming dataset)]
 ```
 
 ## 6. Repository Structure
@@ -84,6 +80,7 @@ gigwise-analytics/
 ├── .env.example
 ├── Makefile
 ├── docker-compose.yml
+├── pyproject.toml
 ├── terraform/
 │   ├── versions.tf
 │   ├── variables.tf
@@ -92,69 +89,93 @@ gigwise-analytics/
 ├── bruin_pipeline/
 │   ├── pipeline.yml
 │   └── assets/
-│       ├── ingestion/
-│       ├── staging/
-│       └── quality/
+│       ├── ingestion/   (run_dlt_ingestion.py)
+│       ├── staging/     (stg_concerts_union.sql)
+│       └── quality/     (check_event_dates.sql)
 ├── dlt_pipeline/
 │   ├── ingest_pipeline.py
 │   └── README.md
 ├── kestra/
 │   └── flows/
+│       └── concert_pipeline_daily.yml
 ├── spark_jobs/
+│   └── join_raw_sources.py
 ├── dbt_concert/
 │   ├── dbt_project.yml
-│   ├── profiles.yml.example
+│   ├── profiles.yml
 │   ├── models/
+│   │   ├── sources.yml
+│   │   ├── staging/     (stg_ticketmaster__events, stg_setlistfm__setlists)
+│   │   ├── intermediate/ (int_concerts_unified)
+│   │   ├── core/        (dim_artist, fact_concert)
+│   │   └── marts/       (mart_artist_touring_intensity, mart_artist_daily_activity, mart_artist_yearly_repertoire, mart_artist_setlist_staleness)
 │   └── tests/
 ├── dashboard/
 │   └── streamlit_app.py
-├── kafka/
-│   ├── producer.py
-│   └── consumer.py
 └── docs/
-	└── first_time_setup_checklist.md
+    ├── index.md
+    ├── project_context_and_objective.md
+    ├── ingestion_design_and_rationale.md
+    ├── dbt_models_and_logic.md
+    ├── bruin_orchestration_and_quality.md
+    ├── critical_review_and_next_steps.md
+    ├── current_state_assessment.md
+    └── personal_ops_guide.md (gitignored)
 ```
 
 ## 7. Batch vs Stream Decision
 
 Primary path: batch.
 
-Reasoning:
+Spark and Kafka are included to demonstrate both processing paradigms:
+
+- **Batch (primary):** dlt → BigQuery → dbt → Streamlit. Spark job demonstrates batch join of raw sources from GCS.
+- **Streaming (supplementary):** Kafka (Redpanda) broker + consumer for real-time event ingestion. BigQuery `streaming` dataset provisioned for landing.
+
+Reasoning for batch as primary path:
 - Setlist and artist enrichment data changes on daily cadence, not second-by-second
 - Batch improves cost control and reproducibility for peer review
 - Zoomcamp criteria accept either batch or streaming
 
-Streaming is included as an optional enhancement for ticket availability updates.
-
 ## 8. Data Model Overview
 
-Core entities are implemented with dbt as dimensions/facts (initial subset included in this repository):
+Core entities implemented with dbt as dimensions/facts:
 
-- `dim_artist`
-- `fact_concert`
-- `fact_artist_snapshot`
+- `dim_artist`: unified artist dimension with genre from MusicBrainz tags
+- `fact_concert`: central event fact table (UNION of Ticketmaster upcoming + Setlist.fm historical)
 
-Starter marts for dashboard tiles:
+Marts for dashboard tiles:
 
-- `mart_genre_country_distribution`
-- `mart_artist_monthly_activity`
+- `mart_artist_touring_intensity`: touring intensity by artist, genre, and country (Tile 1)
+- `mart_artist_yearly_repertoire`: unique songs played per artist per year (Tile 2)
+- `mart_artist_setlist_staleness`: year-over-year setlist overlap (Staleness Index)
+- `mart_artist_daily_activity`: per-concert timeline with setlist context
 
-Partitioning/clustering strategy for full build:
+## 9. Dashboard
 
-- `fact_concert`: partition by `event_date`, cluster by `artist_id, country`
-- `fact_setlist_song`: partition by `event_date`, cluster by `artist_id, song_id`
-- `fact_artist_snapshot`: partition by `snapshot_date`, cluster by `artist_id`
+The Streamlit app contains two core tiles:
 
-## 9. Dashboard Requirements Coverage
+1. **Artist Touring Intensity**: Altair bar charts showing which artists have the most upcoming concerts across countries, with genre breakdown. Both charts sorted descending by concert count. Shows explicit date range of upcoming concerts.
 
-The Streamlit app contains two core tiles required by the project rubric:
+2. **Setlist Repertoire Over Time**: per-artist bar chart of unique songs played each year, revealing how repertoire evolves over touring history.
 
-1. Categorical distribution tile:
-   genre-country concert counts
-2. Temporal tile:
-   monthly artist touring activity with popularity trend overlay
+3. **Setlist Staleness Index**: per-artist year-over-year analysis showing what percentage of each year's setlist was also played the previous year. High staleness = predictable set; low staleness = fresh repertoire.
 
-## 10. Security and Secret Handling
+## 10. Data Quality Controls
+
+### Ingestion filtering
+
+- **Ticketmaster**: events without an artist attraction are skipped; artists with fewer than 3 upcoming events are filtered out; attraction classification types "Event Style" and "Venue Based" are excluded (e.g., ABBA Voyage, Piano Bar Soho). Only genuine music artist types from MusicBrainz (Person, Group, Orchestra, Choir) are kept.
+- **Setlist.fm**: uses MBID-based endpoint (`artist/{mbid}/setlists`) for exact artist matching when MBID is available. Falls back to name search with strict matching for unresolved artists. Up to 80 pages fetched per artist for full historical coverage. Only data from year 2000 onward is included (filtered in both the pipeline and the dbt staging model).
+
+### dbt tests
+
+- `dim_artist.artist_id`: not_null
+- `fact_concert.concert_id`: not_null
+- `fact_concert.event_date`: not_null
+- Singular test: events not more than 3 years in future
+
+## 11. Security and Secret Handling
 
 Do not hardcode or commit secrets.
 
@@ -164,7 +185,7 @@ Do not hardcode or commit secrets.
 - Prefer least-privilege IAM roles
 - Rotate keys immediately if exposed
 
-## 11. Setup and Run (Step by Step)
+## 12. Setup and Run (Step by Step)
 
 ### Step 1: Clone and initialize Python environment
 
@@ -189,7 +210,7 @@ make setup-infra
 
 This creates:
 - GCS bucket for the data lake
-- BigQuery datasets (`raw`, `staging`, `analytics`, `streaming`)
+- BigQuery datasets (`raw`, `analytics`)
 - pipeline service account (optional via Terraform variable)
 
 ### Step 4: Start local orchestration/services
@@ -198,22 +219,12 @@ This creates:
 docker compose up -d
 ```
 
-Local service ports:
-- Kestra: `8081`
-- Spark UI: `8080`
-- Kafka broker: `9092`
-- Kafka UI: `8082`
-
 ### Step 5: Run ingestion and transformations
 
 ```bash
-make run-dlt-snapshots-dry
-make run-dlt-snapshots
-make run-bruin
-make run-dbt
+make run-bruin              # Bruin orchestration: dlt ingestion + SQL staging + quality checks
+make run-dbt                # Build dbt models and run tests
 ```
-
-`run-dlt-snapshots-dry` validates extraction without loading. `run-dlt-snapshots` loads all API ingestion tables to BigQuery raw. `run-bruin` then executes orchestration/validation assets.
 
 ### Step 6: Run dashboard
 
@@ -221,19 +232,7 @@ make run-dbt
 make run-dashboard
 ```
 
-### Step 7 (optional): Run Spark join job
-
-```bash
-make run-spark
-```
-
-### Step 8 (optional): Start Kafka enhancement
-
-```bash
-make run-kafka
-```
-
-## 12. Quality Checks
+## 13. Quality Checks
 
 Run:
 
@@ -244,26 +243,23 @@ make test
 
 Included checks:
 - Terraform formatting and validation
-- dbt tests
-- dbt singular assertions in `dbt_concert/tests`
+- dbt tests (schema + singular assertions)
 
-## 13. Cost Controls
+## 14. Known Limitations
 
-- Set BigQuery daily quota caps
-- Create billing alerts ($1 and $5)
-- Keep bucket lifecycle and retention policy under control
-- Start with a narrow artist list during development
+- **Ticketmaster GB market**: does not expose priceRanges via Discovery API. Prices removed from scope.
+- **MusicBrainz genre coverage**: ~69% of artists have genre tags. Depends on community tagging.
+- **Setlist.fm rate limits**: API returns 429 on rapid requests; pipeline retries with backoff.
+- **Setlist.fm historical cutoff**: Only setlists from year 2000 onward are ingested (pipeline) and queried (dbt staging).
+- **Pipeline mode toggle**: Set `PIPELINE_MODE=prototype` (default, <5 min) or `PIPELINE_MODE=production` (<1 hr) in `.env` or via any orchestrator env var (see `kestra/flows/concert_pipeline_daily.yml`).
 
-## 14. Current Status and Next Build Chunks
+## 15. Current Metrics
 
-Implemented in this first build chunk:
-- project scaffolding and reproducible structure
-- Terraform base resources
-- Bruin and Kestra starter configs
-- dbt starter models and tests
-- Streamlit dashboard skeleton with 2 required tiles
-
-Next recommended chunk:
-- implement real ingestion logic for each API and schema-normalized raw tables
-- wire dbt profiles and full star schema
-- complete end-to-end dry run on a small artist subset
+- raw.ticketmaster_events: upcoming events across US, CA, GB, DE, IT (quality-filtered, merge on event_id)
+- raw.setlistfm_setlists: ~2455 setlists (3 tracked artists, MBID-based, up to 80 pages)
+- raw.musicbrainz_artists: ~33 resolved artists
+- analytics.dim_artist: ~72 rows with genre coverage
+- analytics.fact_concert: ~2900 rows (UNION of Ticketmaster + Setlist.fm)
+- analytics.mart_artist_yearly_repertoire: 63 rows (3 artists across multiple years)
+- analytics.mart_artist_setlist_staleness: 63 rows
+- dbt build: PASS=9 WARN=0 ERROR=0
