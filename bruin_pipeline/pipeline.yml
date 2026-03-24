@@ -1,4 +1,0 @@
-name: gigwise_analytics
-schedule: "@daily"
-default_connections:
-  google_cloud_platform: bigquery

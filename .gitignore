@@ -23,7 +23,7 @@ google-cloud-sdk/
 terraform.tfvars*
 
 # dbt
-dbt_concert/.user.yml
+dbt/.user.yml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
