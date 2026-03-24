@@ -1,0 +1,45 @@
+id: concert_pipeline_daily
+namespace: gigwise
+
+description: |
+  Daily GigWise Analytics pipeline — single Bruin invocation.
+  Bruin is the inner orchestrator: it manages the full DAG from ingestion through
+  transformation (dlt → staging SQL → quality checks → dbt build).
+  Kestra is the outer scheduler: it triggers the Bruin pipeline on a schedule
+  or via manual trigger. Toggle PIPELINE_MODE to switch between prototype (<5 min)
+  and production (<1 hr) runs.
+
+inputs:
+  - id: pipeline_mode
+    type: STRING
+    defaults: prototype
+    description: "Pipeline mode: 'prototype' (fast, <5 min) or 'production' (full, <1 hr)"
+
+tasks:
+  - id: run_bruin_pipeline
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: |
+      Run the full Bruin pipeline: dlt ingestion → staging SQL → quality checks → dbt build.
+      Bruin manages DAG ordering of all assets internally.
+    containerImage: ghcr.io/astral-sh/uv:python3.12-bookworm
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      volumes:
+        - /workspaces/gigwise-analytics:/workspaces/gigwise-analytics:rw
+        - /home/codespace/.config/gcloud:/root/.config/gcloud:rw
+        - /home/codespace/.cache/uv:/root/.cache/uv
+    env:
+      PIPELINE_MODE: "{{ inputs.pipeline_mode }}"
+      GOOGLE_APPLICATION_CREDENTIALS: /root/.config/gcloud/application_default_credentials.json
+    commands:
+      - apt-get update -qq && apt-get install -y -qq make > /dev/null 2>&1
+      - curl -fsSL https://raw.githubusercontent.com/bruin-data/bruin/main/install.sh | bash 2>/dev/null
+      - export PATH="/workspaces/gigwise-analytics/google-cloud-sdk/bin:$HOME/.local/bin:$HOME/.bruin/bin:$PATH"
+      - cd /workspaces/gigwise-analytics && set -a && . ./.env && set +a && make run-bruin
+
+triggers:
+  - id: daily_schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 6 * * *"
+    inputs:
+      pipeline_mode: production

@@ -46,27 +46,23 @@ def main() -> None:
 
     # Submit Dataproc Serverless batch job
     print("=== Submitting Dataproc Serverless batch job ===", flush=True)
-    env_vars = {
-        "GCP_PROJECT_ID": project_id,
-        "BQ_DATASET_ANALYTICS": dataset,
-        "DATA_LAKE_BUCKET": gcs_bucket,
-        "DATAPROC_SERVERLESS": "1",
-    }
 
+    props = ",".join([
+        "spark.executor.instances=2",
+        "spark.dynamicAllocation.maxExecutors=2",
+        f"spark.hadoop.fs.gs.project.id={project_id}",
+        f"spark.gigwise.projectId={project_id}",
+        f"spark.gigwise.dataset={dataset}",
+        f"spark.gigwise.gcsBucket={gcs_bucket}",
+    ])
     cmd = [
         "gcloud", "dataproc", "batches", "submit", "pyspark",
         gcs_script,
         f"--project={project_id}",
         f"--region={region}",
         f"--deps-bucket=gs://{gcs_bucket}",
-        "--properties=spark.executor.instances=2",
-        "--properties=spark.dynamicAllocation.maxExecutors=2",
-        f"--properties=spark.hadoop.fs.gs.project.id={project_id}",
+        f"--properties={props}",
     ]
-
-    for key, val in env_vars.items():
-        cmd.append(f"--properties=spark.executorEnv.{key}={val}")
-        cmd.append(f"--properties=spark.driverEnv.{key}={val}")
 
     result = subprocess.run(cmd)
     if result.returncode != 0:

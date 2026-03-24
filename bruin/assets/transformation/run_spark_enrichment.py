@@ -39,27 +39,24 @@ def main() -> None:
 
     # Submit Dataproc Serverless batch job
     _status("Submitting Dataproc Serverless batch job")
+    props = ",".join([
+        "spark.executor.instances=2",
+        "spark.dynamicAllocation.maxExecutors=2",
+        f"spark.hadoop.fs.gs.project.id={project_id}",
+        f"spark.gigwise.projectId={project_id}",
+        f"spark.gigwise.dataset={dataset}",
+        f"spark.gigwise.gcsBucket={gcs_bucket}",
+    ])
     cmd = [
         "gcloud", "dataproc", "batches", "submit", "pyspark",
         gcs_script,
         f"--project={project_id}",
         f"--region={region}",
         f"--deps-bucket=gs://{gcs_bucket}",
-        "--properties=spark.executor.instances=2",
-        "--properties=spark.dynamicAllocation.maxExecutors=2",
-        f"--properties=spark.hadoop.fs.gs.project.id={project_id}",
+        f"--properties={props}",
     ]
 
     env = dict(os.environ)
-    env["GCP_PROJECT_ID"] = project_id
-    env["BQ_DATASET_ANALYTICS"] = dataset
-    env["DATA_LAKE_BUCKET"] = gcs_bucket
-    env["DATAPROC_SERVERLESS"] = "1"
-
-    # Pass env vars as Spark properties
-    for key in ("GCP_PROJECT_ID", "BQ_DATASET_ANALYTICS", "DATA_LAKE_BUCKET", "DATAPROC_SERVERLESS"):
-        cmd.append(f"--properties=spark.executorEnv.{key}={env[key]}")
-        cmd.append(f"--properties=spark.driverEnv.{key}={env[key]}")
 
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
     sys.stdout.write(result.stdout)

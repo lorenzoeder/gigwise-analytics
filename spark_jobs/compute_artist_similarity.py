@@ -18,14 +18,17 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 
-def main() -> None:
-    project_id = os.environ.get("GCP_PROJECT_ID", "").strip()
-    dataset = os.getenv("BQ_DATASET_ANALYTICS", "analytics")
-    gcs_bucket = os.environ.get("DATA_LAKE_BUCKET", "").strip()
+def _conf_or_env(spark: SparkSession | None, prop: str, env_key: str, default: str = "") -> str:
+    """Read from Spark conf (Dataproc) with env var fallback (local)."""
+    if spark:
+        val = spark.conf.get(prop, "").strip()
+        if val:
+            return val
+    return os.environ.get(env_key, default).strip()
 
-    if not project_id:
-        print("GCP_PROJECT_ID not set", file=sys.stderr)
-        raise SystemExit(1)
+
+def main() -> None:
+    is_serverless = os.environ.get("DATAPROC_SERVERLESS") or False
 
     builder = (
         SparkSession.builder
@@ -34,7 +37,7 @@ def main() -> None:
 
     # When running on Dataproc Serverless, master and BQ connector are
     # pre-configured. For local testing, set them explicitly.
-    if not os.environ.get("DATAPROC_SERVERLESS"):
+    if not is_serverless:
         builder = (
             builder
             .master("local[*]")
@@ -42,10 +45,20 @@ def main() -> None:
             .config("spark.jars.packages", "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1")
         )
 
-    if gcs_bucket:
-        builder = builder.config("temporaryGcsBucket", gcs_bucket)
-
     spark = builder.getOrCreate()
+
+    project_id = _conf_or_env(spark, "spark.gigwise.projectId", "GCP_PROJECT_ID")
+    dataset = _conf_or_env(spark, "spark.gigwise.dataset", "BQ_DATASET_ANALYTICS", "analytics")
+    gcs_bucket = _conf_or_env(spark, "spark.gigwise.gcsBucket", "DATA_LAKE_BUCKET")
+
+    if not project_id:
+        print("GCP_PROJECT_ID not set", file=sys.stderr)
+        spark.stop()
+        raise SystemExit(1)
+
+    if gcs_bucket:
+        spark.conf.set("temporaryGcsBucket", gcs_bucket)
+
     spark.sparkContext.setLogLevel("WARN")
 
     # Read fact_concert directly from BigQuery
