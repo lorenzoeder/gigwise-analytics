@@ -27,7 +27,7 @@ def main() -> None:
     uv = "uv"
     _run([uv, "run", "dbt", "deps", "--target", "prod"], cwd=dbt_dir, env=env)
     _run(
-        [uv, "run", "dbt", "build", "--target", "prod", "--full-refresh", "--fail-fast"],
+        [uv, "run", "dbt", "build", "--target", "prod", "--fail-fast"],
         cwd=dbt_dir,
         env=env,
     )

@@ -3,6 +3,11 @@ locals {
   pipeline_service_email = var.existing_pipeline_sa_email != "" ? var.existing_pipeline_sa_email : (var.create_pipeline_sa ? google_service_account.pipeline[0].email : null)
 }
 
+resource "google_project_service" "dataproc" {
+  service            = "dataproc.googleapis.com"
+  disable_on_destroy = false
+}
+
 resource "google_storage_bucket" "data_lake" {
   name                        = local.lake_bucket_name
   location                    = var.gcp_region
@@ -11,6 +16,26 @@ resource "google_storage_bucket" "data_lake" {
 
   versioning {
     enabled = true
+  }
+
+  lifecycle_rule {
+    condition {
+      age                = 7
+      with_state         = "ARCHIVED"
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  lifecycle_rule {
+    condition {
+      age            = 1
+      matches_prefix = ["spark-bigquery-"]
+    }
+    action {
+      type = "Delete"
+    }
   }
 }
 

@@ -8,7 +8,6 @@ depends:
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,88 +18,56 @@ def _status(msg: str) -> None:
 
 
 def main() -> None:
-    mode = os.getenv("PIPELINE_MODE", "prototype").strip().lower()
-    if mode != "production":
-        _status("Skipping Spark enrichment (prototype mode)")
-        return
-
-    repo_root = Path(__file__).resolve().parents[3]
-    spark_dir = repo_root / "spark_jobs"
-    data_dir = spark_dir / "data"
-    input_dir = data_dir / "input"
-    output_dir = data_dir / "output"
-
-    # Prepare directories
-    if input_dir.exists():
-        shutil.rmtree(input_dir)
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     project_id = os.environ["GCP_PROJECT_ID"]
+    region = os.environ.get("GCP_REGION", "europe-west2")
+    gcs_bucket = os.environ.get("DATA_LAKE_BUCKET", "")
     dataset = os.getenv("BQ_DATASET_ANALYTICS", "analytics")
 
-    # Step 1: Export fact_concert from BigQuery to local parquet
-    _status("Exporting fact_concert from BigQuery to local parquet")
-    from google.cloud import bigquery
+    repo_root = Path(__file__).resolve().parents[3]
+    spark_script = repo_root / "spark_jobs" / "compute_artist_similarity.py"
+    gcs_script = f"gs://{gcs_bucket}/spark_jobs/compute_artist_similarity.py"
 
-    client = bigquery.Client(project=project_id)
-    query = f"SELECT * FROM `{project_id}.{dataset}.fact_concert`"
-    df = client.query(query).to_dataframe()
-    parquet_path = input_dir / "fact_concert.parquet"
-    df.to_parquet(parquet_path, index=False)
-    _status(f"Exported {len(df)} rows to {parquet_path}")
-
-    if len(df) == 0:
-        _status("No data in fact_concert — skipping Spark job")
-        return
-
-    # Step 2: Run Spark job locally via PySpark
-    _status("Running PySpark artist similarity computation")
-    env = dict(os.environ)
-    env["PYTHONUNBUFFERED"] = "1"
-    env["JAVA_HOME"] = "/usr/local/sdkman/candidates/java/21.0.10-ms"
-
-    spark_script = spark_dir / "compute_artist_similarity.py"
+    # Upload PySpark script to GCS
+    _status("Uploading Spark job to GCS")
     result = subprocess.run(
-        ["uv", "run", "python", str(spark_script)],
-        cwd=str(repo_root),
-        env=env,
-        capture_output=True,
-        text=True,
+        ["gcloud", "storage", "cp", str(spark_script), gcs_script],
+        capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        raise RuntimeError("Failed to upload Spark script to GCS")
+
+    # Submit Dataproc Serverless batch job
+    _status("Submitting Dataproc Serverless batch job")
+    cmd = [
+        "gcloud", "dataproc", "batches", "submit", "pyspark",
+        gcs_script,
+        f"--project={project_id}",
+        f"--region={region}",
+        f"--deps-bucket=gs://{gcs_bucket}",
+        "--properties=spark.executor.instances=2",
+        "--properties=spark.dynamicAllocation.maxExecutors=2",
+        f"--properties=spark.hadoop.fs.gs.project.id={project_id}",
+    ]
+
+    env = dict(os.environ)
+    env["GCP_PROJECT_ID"] = project_id
+    env["BQ_DATASET_ANALYTICS"] = dataset
+    env["DATA_LAKE_BUCKET"] = gcs_bucket
+    env["DATAPROC_SERVERLESS"] = "1"
+
+    # Pass env vars as Spark properties
+    for key in ("GCP_PROJECT_ID", "BQ_DATASET_ANALYTICS", "DATA_LAKE_BUCKET", "DATAPROC_SERVERLESS"):
+        cmd.append(f"--properties=spark.executorEnv.{key}={env[key]}")
+        cmd.append(f"--properties=spark.driverEnv.{key}={env[key]}")
+
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     if result.returncode != 0:
-        raise RuntimeError(f"Spark job failed with exit code {result.returncode}")
+        raise RuntimeError(f"Dataproc batch job failed with exit code {result.returncode}")
 
-    # Step 3: Load result back into BigQuery
-    output_parquet = output_dir / "artist_similarity.parquet"
-    if not output_parquet.exists():
-        # Spark writes partitioned output — look for part files
-        part_files = list(output_dir.glob("*.parquet"))
-        if not part_files:
-            _status("No output parquet found — Spark may have written empty result")
-            return
-
-    _status("Loading Spark output into BigQuery")
-    import pandas as pd
-
-    result_df = pd.read_parquet(output_dir)
-    if result_df.empty:
-        _status("Empty similarity result — no overlapping repertoires found")
-        return
-
-    table_ref = f"{project_id}.{dataset}.spark_artist_similarity"
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    load_job = client.load_table_from_dataframe(result_df, table_ref, job_config=job_config)
-    load_job.result()
-    _status(f"Loaded {len(result_df)} rows into {table_ref}")
-
-    # Clean up temp data
-    shutil.rmtree(data_dir, ignore_errors=True)
-    _status("Spark enrichment complete")
+    _status("Spark enrichment complete (Dataproc Serverless)")
 
 
 if __name__ == "__main__":

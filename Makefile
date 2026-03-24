@@ -23,7 +23,7 @@ help:
 	@echo "  run-dashboard   Start Streamlit dashboard (background, logs to logs/dashboard.log)"
 	@echo "  run-dashboard-logs     Tail Streamlit dashboard logs"
 	@echo "  stop-dashboard         Stop background Streamlit process"
-	@echo "  run-spark       Run PySpark artist similarity job (exports from BQ, runs Spark, loads results back)"
+	@echo "  run-spark       Submit PySpark artist similarity job to Dataproc Serverless"
 	@echo "  run-streaming   Start Kafka broker + producer + consumer (streaming add-on)"
 	@echo "  stop-streaming  Stop all streaming processes"
 	@echo "  test            Run lightweight project checks"
@@ -32,8 +32,10 @@ help:
 
 
 env-check:
-	@test -n "$$GCP_PROJECT_ID" || (echo "Missing GCP_PROJECT_ID" && exit 1)
-	@test -n "$$GCP_REGION" || (echo "Missing GCP_REGION" && exit 1)
+	@cd $(ROOT_DIR) && \
+	set -a; [ -f .env ] && source .env; set +a; \
+	test -n "$$GCP_PROJECT_ID" || (echo "Missing GCP_PROJECT_ID" && exit 1); \
+	test -n "$$GCP_REGION" || (echo "Missing GCP_REGION" && exit 1)
 
 gcp-auth-check:
 	@command -v gcloud >/dev/null 2>&1 || (echo "gcloud CLI not found on PATH" && exit 1)
@@ -45,11 +47,13 @@ bruin-check:
 setup-infra:
 	$(MAKE) -f $(MAKEFILE_PATH) env-check
 	$(MAKE) -f $(MAKEFILE_PATH) gcp-auth-check
+	cd $(ROOT_DIR) && set -a; [ -f .env ] && source .env; set +a; \
 	cd $(ROOT_DIR)terraform && terraform init && terraform apply -auto-approve -var "gcp_project_id=$$GCP_PROJECT_ID" -var "gcp_region=$$GCP_REGION" -var "existing_pipeline_sa_email=$${EXISTING_PIPELINE_SA_EMAIL:-}"
 
 destroy-infra:
 	$(MAKE) -f $(MAKEFILE_PATH) env-check
 	$(MAKE) -f $(MAKEFILE_PATH) gcp-auth-check
+	cd $(ROOT_DIR) && set -a; [ -f .env ] && source .env; set +a; \
 	cd $(ROOT_DIR)terraform && terraform destroy -auto-approve -var "gcp_project_id=$$GCP_PROJECT_ID" -var "gcp_region=$$GCP_REGION" -var "existing_pipeline_sa_email=$${EXISTING_PIPELINE_SA_EMAIL:-}"
 
 wipe-ingestion:
@@ -136,7 +140,6 @@ stop-dashboard:
 
 run-spark:
 	@cd $(ROOT_DIR) && set -a && source .env && set +a && \
-	export JAVA_HOME=/usr/local/sdkman/candidates/java/21.0.10-ms && \
 	uv run python spark_jobs/run_standalone.py
 
 run-streaming:

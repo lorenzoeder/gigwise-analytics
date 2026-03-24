@@ -1,50 +1,72 @@
 """Spark job: compute pairwise artist repertoire similarity.
 
-Reads fact_concert parquet (exported from BigQuery by the Bruin wrapper),
+Reads fact_concert from BigQuery via the Spark BigQuery connector,
 explodes semicolon-delimited song lists, and computes the Jaccard similarity
 index between every pair of artists that share at least one song.
 
-Input:  spark_jobs/data/input/fact_concert.parquet
-Output: spark_jobs/data/output/artist_similarity.parquet
+Writes results directly back to BigQuery (spark_artist_similarity table).
+
+Designed to run on Dataproc Serverless — no local temp files needed.
 """
 
 from __future__ import annotations
 
+import os
 import sys
-from pathlib import Path
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 
 def main() -> None:
-    data_dir = Path(__file__).resolve().parent / "data"
-    input_path = str(data_dir / "input" / "fact_concert.parquet")
-    output_path = str(data_dir / "output" / "artist_similarity.parquet")
+    project_id = os.environ.get("GCP_PROJECT_ID", "").strip()
+    dataset = os.getenv("BQ_DATASET_ANALYTICS", "analytics")
+    gcs_bucket = os.environ.get("DATA_LAKE_BUCKET", "").strip()
 
-    spark = (
+    if not project_id:
+        print("GCP_PROJECT_ID not set", file=sys.stderr)
+        raise SystemExit(1)
+
+    builder = (
         SparkSession.builder
         .appName("GigwiseArtistSimilarity")
-        .master("local[*]")
-        .config("spark.driver.memory", "2g")
-        .getOrCreate()
     )
+
+    # When running on Dataproc Serverless, master and BQ connector are
+    # pre-configured. For local testing, set them explicitly.
+    if not os.environ.get("DATAPROC_SERVERLESS"):
+        builder = (
+            builder
+            .master("local[*]")
+            .config("spark.driver.memory", "2g")
+            .config("spark.jars.packages", "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1")
+        )
+
+    if gcs_bucket:
+        builder = builder.config("temporaryGcsBucket", gcs_bucket)
+
+    spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
-    try:
-        concerts = spark.read.parquet(input_path)
-    except Exception as exc:
-        print(f"[ERROR] Cannot read {input_path}: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+    # Read fact_concert directly from BigQuery
+    source_table = f"{project_id}.{dataset}.fact_concert"
+    print(f"Reading from BigQuery: {source_table}", flush=True)
+    concerts = spark.read.format("bigquery").option("table", source_table).load()
 
     # Only setlistfm rows have song data
     setlist_concerts = concerts.filter(
         (F.col("source") == "setlistfm") & F.col("songs_played").isNotNull()
     )
 
+    dest_table = f"{project_id}.{dataset}.spark_artist_similarity"
+
     if setlist_concerts.count() == 0:
-        print("[WARN] No setlist data with songs — writing empty output")
-        spark.createDataFrame([], "artist_a STRING, artist_b STRING, shared_songs LONG, jaccard_similarity DOUBLE, shared_songs_detail STRING").write.mode("overwrite").parquet(output_path)
+        print("[WARN] No setlist data with songs — writing empty result")
+        empty = spark.createDataFrame(
+            [],
+            "artist_a STRING, artist_b STRING, shared_songs LONG, jaccard_similarity DOUBLE, shared_songs_detail STRING",
+        )
+        empty.write.format("bigquery").option("table", dest_table).option("writeMethod", "direct").mode("overwrite").save()
         spark.stop()
         return
 
@@ -96,9 +118,12 @@ def main() -> None:
         .orderBy(F.col("jaccard_similarity").desc())
     )
 
-    result.write.mode("overwrite").parquet(output_path)
+    # Write directly to BigQuery
+    print(f"Writing results to BigQuery: {dest_table}", flush=True)
+    result.write.format("bigquery").option("table", dest_table).option("writeMethod", "direct").mode("overwrite").save()
+
     row_count = result.count()
-    print(f"[OK] Wrote {row_count} artist-pair similarities to {output_path}")
+    print(f"[OK] Wrote {row_count} artist-pair similarities to {dest_table}")
     spark.stop()
 
 
