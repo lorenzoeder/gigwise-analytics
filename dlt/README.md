@@ -6,7 +6,7 @@ This folder contains the primary ingestion pipeline for all external APIs:
 - Setlist.fm setlists (historical setlists from year 2000 onward)
 - MusicBrainz artist metadata (with persistent GCS-backed cache)
 
-Bruin orchestrates this pipeline as part of its DAG (ingestion → staging SQL → quality checks). Kestra schedules Bruin runs on a daily cron.
+Bruin orchestrates this pipeline as part of its DAG (ingestion → staging SQL → quality checks → dbt build). Kestra schedules Bruin runs on a daily cron.
 
 ## Pipeline Modes
 

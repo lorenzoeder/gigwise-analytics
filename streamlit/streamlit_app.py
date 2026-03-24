@@ -43,7 +43,7 @@ with tile1:
     st.subheader("Artist Touring Intensity")
 
     df_1 = run_query(f"""
-        SELECT artist_name, primary_genre, country, concert_count, avg_songs_played
+        SELECT artist_name, primary_genre, country, concert_count
         FROM `{project_id}.{dataset}.mart_artist_touring_intensity`
         ORDER BY concert_count DESC
         LIMIT 500
@@ -82,7 +82,7 @@ with tile1:
                     "artist_name:N",
                     sort=artist_order,
                     title="Artist",
-                    axis=alt.Axis(labelAngle=-45, labelLimit=0, labelOverlap=True),
+                    axis=alt.Axis(labelAngle=-90, labelLimit=100),
                 ),
                 y=alt.Y("concert_count:Q", title="Concert Count"),
                 color=alt.Color("country:N", title="Country"),
@@ -119,7 +119,7 @@ with tile1:
     else:
         st.info("No data yet in mart_artist_touring_intensity.")
 
-# ── Tile 2: Setlist Repertoire + Staleness ───────────────────────────
+# ── Tile 2: Setlist Repertoire + Freshness ──────────────────────────
 
 df_repertoire = run_query(f"""
     SELECT artist_name, primary_genre, concert_year, concert_count,
@@ -130,10 +130,10 @@ df_repertoire = run_query(f"""
     LIMIT 5000
 """)
 
-df_staleness = run_query(f"""
+df_freshness = run_query(f"""
     SELECT artist_name, primary_genre, concert_year, concert_count,
-           unique_songs, songs_from_prior_year, new_songs, staleness_pct
-    FROM `{project_id}.{dataset}.mart_artist_setlist_staleness`
+           unique_songs, first_time_songs, repeated_songs, freshness_pct
+    FROM `{project_id}.{dataset}.mart_artist_setlist_freshness`
     WHERE artist_name IS NOT NULL
     ORDER BY artist_name, concert_year
     LIMIT 5000
@@ -145,17 +145,21 @@ with tile2:
     # Build a unified artist list from both datasets
     all_artists = sorted(
         set(df_repertoire["artist_name"].dropna().unique().tolist())
-        | set(df_staleness["artist_name"].dropna().unique().tolist())
-    ) if not df_repertoire.empty or not df_staleness.empty else []
+        | set(df_freshness["artist_name"].dropna().unique().tolist())
+    ) if not df_repertoire.empty or not df_freshness.empty else []
 
     if all_artists:
         selected_artist = st.selectbox("Artist", all_artists, key="tile2_artist")
     else:
         selected_artist = None
 
-    # ── Repertoire chart ──
+    # ── Combined Repertoire + Freshness chart ──
     st.subheader("Setlist Repertoire Over Time")
-    st.caption("How many unique songs does each artist play per year of touring? (data from 2000 onward)")
+    st.caption(
+        "How many unique songs does each artist play per year of touring? (data from 2000 onward)  \n"
+        "The line shows the Freshness Index: % of songs appearing for the first time in the dataset "
+        "(high = fresh repertoire, low = predictable setlist)."
+    )
 
     if not df_repertoire.empty and selected_artist:
         filt = df_repertoire[
@@ -163,12 +167,48 @@ with tile2:
             & (df_repertoire["concert_count"] >= MIN_SHOWS)
         ].sort_values("concert_year")
 
+        s_filt = (
+            df_freshness[
+                (df_freshness["artist_name"] == selected_artist)
+                & (df_freshness["concert_count"] >= MIN_SHOWS)
+            ].sort_values("concert_year")
+            if not df_freshness.empty
+            else pd.DataFrame()
+        )
+        # Skip first year per artist (always 100 % fresh)
+        if not s_filt.empty:
+            s_filt = s_filt[s_filt["concert_year"] > s_filt["concert_year"].min()]
+
         if not filt.empty:
             genre = filt["primary_genre"].dropna().unique()
             if len(genre):
                 st.caption(f"Genre: {genre[0]}")
 
-            st.bar_chart(filt.set_index("concert_year")[["unique_songs"]])
+            bars = (
+                alt.Chart(filt)
+                .mark_bar(color="#5276A7")
+                .encode(
+                    x=alt.X("concert_year:O", title="Year"),
+                    y=alt.Y("unique_songs:Q", title="Unique Songs"),
+                    tooltip=["concert_year", "concert_count", "unique_songs", "total_song_performances"],
+                )
+            )
+
+            if not s_filt.empty:
+                line = (
+                    alt.Chart(s_filt)
+                    .mark_line(color="#E45756", point=True, strokeWidth=2)
+                    .encode(
+                        x=alt.X("concert_year:O"),
+                        y=alt.Y("freshness_pct:Q", title="Freshness %", scale=alt.Scale(domain=[0, 100])),
+                        tooltip=["concert_year", "freshness_pct", "first_time_songs", "repeated_songs"],
+                    )
+                )
+                combined = alt.layer(bars, line).resolve_scale(y="independent").properties(height=350)
+            else:
+                combined = bars.properties(height=350)
+
+            st.altair_chart(combined, use_container_width=True)
 
             total_years = len(filt)
             total_unique = filt["unique_songs"].sum()
@@ -178,47 +218,21 @@ with tile2:
                 f"{total_unique} unique songs total \u2014 "
                 f"{total_perfs} total song performances"
             )
+
+            if not s_filt.empty:
+                st.dataframe(
+                    s_filt[["concert_year", "concert_count", "unique_songs", "first_time_songs", "repeated_songs", "freshness_pct"]]
+                    .rename(columns={
+                        "concert_year": "Year",
+                        "concert_count": "Shows",
+                        "unique_songs": "Unique Songs",
+                        "first_time_songs": "First-time Songs",
+                        "repeated_songs": "Repeated",
+                        "freshness_pct": "Freshness %",
+                    }),
+                    hide_index=True,
+                )
         else:
             st.info(f"No years with \u2265{MIN_SHOWS} shows for {selected_artist}.")
     elif not selected_artist:
         st.info("No setlist data yet in mart_artist_yearly_repertoire.")
-
-    # ── Staleness chart ──
-    st.subheader("Setlist Staleness Index")
-    st.caption("What % of each year\u2019s setlist songs were also played the previous year? (data from 2000 onward)")
-
-    if not df_staleness.empty and selected_artist:
-        s_filt = df_staleness[
-            (df_staleness["artist_name"] == selected_artist)
-            & (df_staleness["concert_count"] >= MIN_SHOWS)
-        ].sort_values("concert_year")
-
-        if not s_filt.empty:
-            staleness_chart = (
-                alt.Chart(s_filt)
-                .mark_bar()
-                .encode(
-                    x=alt.X("concert_year:O", title="Year"),
-                    y=alt.Y("staleness_pct:Q", title="Staleness %", scale=alt.Scale(domain=[0, 100])),
-                    tooltip=["concert_year", "concert_count", "unique_songs", "new_songs", "staleness_pct"],
-                )
-                .properties(height=300)
-            )
-            st.altair_chart(staleness_chart, use_container_width=True)
-
-            st.dataframe(
-                s_filt[["concert_year", "concert_count", "unique_songs", "new_songs", "songs_from_prior_year", "staleness_pct"]]
-                .rename(columns={
-                    "concert_year": "Year",
-                    "concert_count": "Shows",
-                    "unique_songs": "Unique Songs",
-                    "new_songs": "New Songs",
-                    "songs_from_prior_year": "Repeated",
-                    "staleness_pct": "Staleness %",
-                }),
-                hide_index=True,
-            )
-        else:
-            st.info(f"No years with \u2265{MIN_SHOWS} shows for {selected_artist}.")
-    elif not selected_artist:
-        st.info("No staleness data yet. Run the pipeline with full historical setlists.")

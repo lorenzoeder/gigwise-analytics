@@ -3,7 +3,7 @@ MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 ROOT_DIR := $(dir $(MAKEFILE_PATH))
 DBT_BUILD_FLAGS ?= --full-refresh --fail-fast
 
-.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug run-dashboard run-dashboard-logs stop-dashboard run-spark run-kafka test lint fmt
+.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra wipe-ingestion run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug run-dashboard run-dashboard-logs stop-dashboard run-spark run-kafka test lint fmt
 
 help:
 	@echo "Available targets:"
@@ -12,12 +12,13 @@ help:
 	@echo "  bruin-check     Verify Bruin CLI is installed"
 	@echo "  setup-infra     Initialize and apply Terraform"
 	@echo "  destroy-infra   Destroy Terraform-managed infrastructure"
+	@echo "  wipe-ingestion  Truncate raw ingestion tables + drop staging view (requires CONFIRM_WIPE=1)"
 	@echo "  run-dlt         Load Ticketmaster/Setlist.fm/MusicBrainz via dlt"
 	@echo "  run-dlt-dry     Fetch all ingestion sources (no load)"
-	@echo "  run-bruin       Run Bruin orchestration assets (includes dlt ingestion task)"
-	@echo "  run-bruin-dry   Validate Bruin pipeline only (no ingestion)"
+	@echo "  run-bruin       Full pipeline: dlt ingestion + SQL staging + quality + dbt build"
+	@echo "  run-bruin-dry   Validate Bruin pipeline only (no execution)"
 	@echo "  run-dbt-debug   Validate dbt profile/connection"
-	@echo "  run-dbt         Run dbt models and tests"
+	@echo "  run-dbt         Run dbt models and tests (standalone)"
 	@echo "  run-dashboard   Start Streamlit dashboard (background, logs to logs/dashboard.log)"
 	@echo "  run-dashboard-logs     Tail Streamlit dashboard logs"
 	@echo "  stop-dashboard         Stop background Streamlit process"
@@ -48,6 +49,15 @@ destroy-infra:
 	$(MAKE) -f $(MAKEFILE_PATH) env-check
 	$(MAKE) -f $(MAKEFILE_PATH) gcp-auth-check
 	cd $(ROOT_DIR)terraform && terraform destroy -auto-approve -var "gcp_project_id=$$GCP_PROJECT_ID" -var "gcp_region=$$GCP_REGION" -var "existing_pipeline_sa_email=$${EXISTING_PIPELINE_SA_EMAIL:-}"
+
+wipe-ingestion:
+	@test "$$CONFIRM_WIPE" = "1" || (echo "Refusing to wipe data. Re-run with: make wipe-ingestion CONFIRM_WIPE=1" && exit 1)
+	cd $(ROOT_DIR) && set -a && source .env && set +a && \
+	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.ticketmaster_events\`" && \
+	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.setlistfm_setlists\`" && \
+	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.musicbrainz_artists\`" && \
+	bq query --nouse_legacy_sql "DROP VIEW IF EXISTS \`$$GCP_PROJECT_ID.$$BQ_DATASET_STAGING.stg_concerts_union\`"
+	@echo "Ingestion data wiped: raw source tables truncated and staging view dropped."
 
 run-dlt:
 	cd $(ROOT_DIR) && set -a && source .env && set +a && PYTHONUNBUFFERED=1 uv run python $(ROOT_DIR)dlt/ingest_pipeline.py

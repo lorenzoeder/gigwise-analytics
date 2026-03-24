@@ -756,6 +756,17 @@ def _run_dlt(rows: dict[str, list[dict[str, Any]]]) -> None:
     _status("dlt load completed successfully")
     print(load_info, flush=True)
 
+    # Clean up the transient staging dataset dlt creates for merge operations
+    from google.cloud import bigquery as bq_client
+
+    client = bq_client.Client(project=os.environ.get("GCP_PROJECT_ID"))
+    staging_dataset = f"{dataset_name}_staging"
+    try:
+        client.delete_dataset(staging_dataset, delete_contents=True, not_found_ok=True)
+        _status(f"Cleaned up staging dataset: {staging_dataset}")
+    except Exception as exc:  # noqa: BLE001
+        _status(f"Warning: could not drop staging dataset {staging_dataset}: {exc}")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()

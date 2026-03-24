@@ -1,9 +1,8 @@
 SELECT
   COALESCE(d.artist_name, f.artist_name) AS artist_name,
-  d.primary_genre,
+  INITCAP(d.primary_genre) AS primary_genre,
   f.country,
-  COUNT(*) AS concert_count,
-  AVG(f.songs_played_count) AS avg_songs_played
+  COUNT(*) AS concert_count
 FROM {{ ref('fact_concert') }} f
 LEFT JOIN {{ ref('dim_artist') }} d
   ON f.artist_id = d.artist_id

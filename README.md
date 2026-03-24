@@ -18,7 +18,7 @@ This project builds an end-to-end data pipeline that ingests concert and setlist
 |---|---|
 | Problem description | This README defines the analytical problem and business questions clearly |
 | Cloud | GCP (GCS + BigQuery), provisioned with Terraform |
-| Data ingestion | dlt API ingestion orchestrated by Bruin (DAG: ingestion → staging SQL → quality checks), scheduled by Kestra |
+| Data ingestion | dlt API ingestion orchestrated by Bruin (DAG: ingestion → staging SQL → quality checks → dbt build), scheduled by Kestra |
 | Data warehouse | BigQuery star schema with partitioning and clustering strategy |
 | Transformations | dbt staging, intermediate, core, and marts layers |
 | Dashboard | Streamlit dashboard with 2 meaningful tiles |
@@ -62,14 +62,13 @@ flowchart LR
 	subgraph Bruin[Bruin Orchestration]
 		DLT --> BQRAW[(BigQuery raw)]
 		BQRAW --> SQL[SQL Staging + Quality]
+		SQL --> DBT[dbt Core Models]
 	end
 
-	BQRAW --> DBT[dbt Core Models]
 	DBT --> BQANA[(BigQuery analytics)]
 	BQANA --> ST[Streamlit Dashboard]
 
 	KE[Kestra Scheduler] --> Bruin
-	KE --> DBT
 ```
 
 ## 6. Repository Structure
@@ -89,9 +88,10 @@ gigwise-analytics/
 ├── bruin/
 │   ├── pipeline.yml
 │   └── assets/
-│       ├── ingestion/   (run_dlt_ingestion.py)
-│       ├── staging/     (stg_concerts_union.sql)
-│       └── quality/     (check_event_dates.sql)
+│       ├── ingestion/       (run_dlt_ingestion.py)
+│       ├── staging/         (stg_concerts_union.sql)
+│       ├── quality/         (check_event_dates.sql)
+│       └── transformation/  (run_dbt_build.py)
 ├── dlt/
 │   ├── ingest_pipeline.py
 │   └── README.md
@@ -108,7 +108,7 @@ gigwise-analytics/
 │   │   ├── staging/     (stg_ticketmaster__events, stg_setlistfm__setlists)
 │   │   ├── intermediate/ (int_concerts_unified)
 │   │   ├── core/        (dim_artist, fact_concert)
-│   │   └── marts/       (mart_artist_touring_intensity, mart_artist_daily_activity, mart_artist_yearly_repertoire, mart_artist_setlist_staleness)
+│   │   └── marts/       (mart_artist_touring_intensity, mart_artist_yearly_repertoire, mart_artist_setlist_freshness)
 │   └── tests/
 ├── streamlit/
 │   └── streamlit_app.py
@@ -146,8 +146,7 @@ Marts for dashboard tiles:
 
 - `mart_artist_touring_intensity`: touring intensity by artist, genre, and country (Tile 1)
 - `mart_artist_yearly_repertoire`: unique songs played per artist per year (Tile 2)
-- `mart_artist_setlist_staleness`: year-over-year setlist overlap (Staleness Index)
-- `mart_artist_daily_activity`: per-concert timeline with setlist context
+- `mart_artist_setlist_freshness`: percentage of first-time songs per artist per year (Freshness Index)
 
 ## 9. Dashboard
 
@@ -157,7 +156,7 @@ The Streamlit app contains two core tiles:
 
 2. **Setlist Repertoire Over Time**: per-artist bar chart of unique songs played each year, revealing how repertoire evolves over touring history.
 
-3. **Setlist Staleness Index**: per-artist year-over-year analysis showing what percentage of each year's setlist was also played the previous year. High staleness = predictable set; low staleness = fresh repertoire.
+3. **Setlist Freshness Index**: per-artist analysis showing what percentage of each year's setlist consists of songs appearing for the first time in the dataset. High freshness = fresh repertoire; low freshness = predictable setlist. First year is excluded (always 100%).
 
 ## 10. Data Quality Controls
 
@@ -220,8 +219,7 @@ docker compose up -d
 ### Step 5: Run ingestion and transformations
 
 ```bash
-make run-bruin              # Bruin orchestration: dlt ingestion + SQL staging + quality checks
-make run-dbt                # Build dbt models and run tests
+make run-bruin              # Full pipeline: dlt ingestion + SQL staging + quality checks + dbt build
 ```
 
 ### Step 6: Run dashboard
@@ -259,5 +257,5 @@ Included checks:
 - analytics.dim_artist: ~72 rows with genre coverage
 - analytics.fact_concert: ~2900 rows (UNION of Ticketmaster + Setlist.fm)
 - analytics.mart_artist_yearly_repertoire: 63 rows (3 artists across multiple years)
-- analytics.mart_artist_setlist_staleness: 63 rows
+- analytics.mart_artist_setlist_freshness: 15 rows
 - dbt build: PASS=9 WARN=0 ERROR=0

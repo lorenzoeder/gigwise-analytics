@@ -1,7 +1,7 @@
 WITH concerts AS (
   SELECT
     COALESCE(d.artist_name, f.artist_name) AS artist_name,
-    d.primary_genre,
+    INITCAP(d.primary_genre) AS primary_genre,
     EXTRACT(YEAR FROM f.event_date) AS concert_year,
     f.concert_id,
     f.songs_played
@@ -42,18 +42,28 @@ distinct_songs AS (
   WHERE song_name != ''
 ),
 
-with_prior AS (
+-- For each song+artist, find the earliest year it appeared
+first_appearance AS (
   SELECT
-    curr.artist_name,
-    curr.primary_genre,
-    curr.concert_year,
+    artist_name,
+    song_name,
+    MIN(concert_year) AS first_year
+  FROM distinct_songs
+  GROUP BY 1, 2
+),
+
+with_freshness AS (
+  SELECT
+    ds.artist_name,
+    ds.primary_genre,
+    ds.concert_year,
     COUNT(*) AS unique_songs,
-    COUNTIF(prev.song_name IS NOT NULL) AS songs_from_prior_year
-  FROM distinct_songs curr
-  LEFT JOIN distinct_songs prev
-    ON curr.artist_name = prev.artist_name
-    AND curr.song_name = prev.song_name
-    AND prev.concert_year = curr.concert_year - 1
+    COUNTIF(fa.first_year = ds.concert_year) AS first_time_songs,
+    COUNTIF(fa.first_year < ds.concert_year) AS repeated_songs
+  FROM distinct_songs ds
+  JOIN first_appearance fa
+    ON ds.artist_name = fa.artist_name
+    AND ds.song_name = fa.song_name
   GROUP BY 1, 2, 3
 )
 
@@ -63,13 +73,13 @@ SELECT
   w.concert_year,
   c.concert_count,
   w.unique_songs,
-  w.songs_from_prior_year,
-  w.unique_songs - w.songs_from_prior_year AS new_songs,
+  w.first_time_songs,
+  w.repeated_songs,
   ROUND(
-    SAFE_DIVIDE(w.songs_from_prior_year, w.unique_songs) * 100,
+    SAFE_DIVIDE(w.first_time_songs, w.unique_songs) * 100,
     1
-  ) AS staleness_pct
-FROM with_prior w
+  ) AS freshness_pct
+FROM with_freshness w
 JOIN concert_counts c
   ON w.artist_name = c.artist_name
   AND w.concert_year = c.concert_year

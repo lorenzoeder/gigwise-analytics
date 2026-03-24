@@ -1,7 +1,7 @@
 WITH concerts AS (
   SELECT
     COALESCE(d.artist_name, f.artist_name) AS artist_name,
-    d.primary_genre,
+    INITCAP(d.primary_genre) AS primary_genre,
     EXTRACT(YEAR FROM f.event_date) AS concert_year,
     f.concert_id,
     f.songs_played
