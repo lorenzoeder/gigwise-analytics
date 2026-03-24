@@ -3,7 +3,7 @@ MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 ROOT_DIR := $(dir $(MAKEFILE_PATH))
 DBT_BUILD_FLAGS ?= --full-refresh --fail-fast
 
-.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra wipe-ingestion run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug run-dashboard run-dashboard-logs stop-dashboard run-spark run-kafka test lint fmt
+.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra wipe-ingestion run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug run-dashboard run-dashboard-logs stop-dashboard run-spark run-streaming stop-streaming test lint fmt
 
 help:
 	@echo "Available targets:"
@@ -22,8 +22,9 @@ help:
 	@echo "  run-dashboard   Start Streamlit dashboard (background, logs to logs/dashboard.log)"
 	@echo "  run-dashboard-logs     Tail Streamlit dashboard logs"
 	@echo "  stop-dashboard         Stop background Streamlit process"
-	@echo "  run-spark       Execute Spark join job in container"
-	@echo "  run-kafka       Start local Kafka stack"
+	@echo "  run-spark       Run PySpark artist similarity job (exports from BQ, runs Spark, loads results back)"
+	@echo "  run-streaming   Start Kafka broker + producer + consumer (streaming add-on)"
+	@echo "  stop-streaming  Stop all streaming processes"
 	@echo "  test            Run lightweight project checks"
 	@echo "  lint            Validate Terraform formatting and syntax"
 	@echo "  fmt             Format Terraform files"
@@ -56,6 +57,7 @@ wipe-ingestion:
 	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.ticketmaster_events\`" && \
 	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.setlistfm_setlists\`" && \
 	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.musicbrainz_artists\`" && \
+	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_STREAMING.live_event_updates\`" && \
 	bq query --nouse_legacy_sql "DROP VIEW IF EXISTS \`$$GCP_PROJECT_ID.$$BQ_DATASET_STAGING.stg_concerts_union\`"
 	@echo "Ingestion data wiped: raw source tables truncated and staging view dropped."
 
@@ -102,11 +104,54 @@ stop-dashboard:
 	fi
 
 run-spark:
-	@test -n "$$DATA_LAKE_BUCKET" || (echo "Missing DATA_LAKE_BUCKET" && exit 1)
-	docker compose run --rm spark /opt/spark/bin/spark-submit /opt/spark_jobs/join_raw_sources.py --bucket $$DATA_LAKE_BUCKET
+	@cd $(ROOT_DIR) && set -a && source .env && set +a && \
+	export JAVA_HOME=/usr/local/sdkman/candidates/java/21.0.10-ms && \
+	uv run python spark_jobs/run_standalone.py
 
-run-kafka:
-	docker compose up -d kafka kafka-ui
+run-streaming:
+	@cd $(ROOT_DIR) && mkdir -p logs && set -a && source .env && set +a && \
+	if [ -f logs/producer.pid ] && kill -0 $$(cat logs/producer.pid) 2>/dev/null; then \
+		echo "Streaming is already running. Run 'make stop-streaming' first."; exit 1; \
+	fi && \
+	docker compose up -d kafka kafka-ui && \
+	echo "Waiting for Kafka broker to be ready..." && \
+	for i in $$(seq 1 30); do \
+		if docker compose exec -T kafka rpk cluster health --api-urls kafka:9644 2>/dev/null | grep -q 'Healthy'; then break; fi; \
+		if [ $$i -eq 30 ]; then echo "Kafka broker failed to start"; exit 1; fi; \
+		sleep 2; \
+	done && \
+	echo "Kafka broker is ready" && \
+	nohup uv run python kafka/producer.py >> logs/producer.log 2>&1 & \
+	nohup uv run python kafka/consumer.py >> logs/consumer.log 2>&1 & \
+	sleep 2 && \
+	echo "Streaming started in background" && \
+	echo "  Producer log: logs/producer.log" && \
+	echo "  Consumer log: logs/consumer.log" && \
+	echo "  Kafka UI:     http://localhost:8082" && \
+	echo "  Stop with:    make stop-streaming"
+
+stop-streaming:
+	@cd $(ROOT_DIR) && \
+	stopped=0; \
+	for proc in producer consumer; do \
+		if [ -f logs/$${proc}.pid ]; then \
+			pid=$$(cat logs/$${proc}.pid); \
+			if kill -0 $$pid 2>/dev/null; then \
+				kill $$pid 2>/dev/null; \
+				for i in $$(seq 1 10); do \
+					kill -0 $$pid 2>/dev/null || break; \
+					if [ $$i -eq 10 ]; then kill -9 $$pid 2>/dev/null; fi; \
+					sleep 0.5; \
+				done; \
+				echo "Stopped $${proc} (PID $$pid)"; \
+				stopped=$$((stopped + 1)); \
+			fi; \
+			rm -f logs/$${proc}.pid; \
+		fi; \
+	done; \
+	docker compose stop kafka kafka-ui 2>/dev/null; \
+	if [ $$stopped -eq 0 ]; then echo "No streaming processes were running"; fi; \
+	echo "Streaming stack stopped"
 
 test:
 	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt && uv run dbt test --target prod

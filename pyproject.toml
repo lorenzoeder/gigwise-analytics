@@ -22,5 +22,6 @@ dependencies = [
     "pandas>=2.2,<3",
     "psycopg2-binary>=2.9.11",
     "pyarrow>=23.0.1",
+    "pyspark>=3.5,<4",
     "streamlit>=1.55.0",
 ]

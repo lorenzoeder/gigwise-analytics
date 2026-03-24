@@ -14,8 +14,8 @@ The pipeline supports two modes, controlled by `PIPELINE_MODE`:
 
 | Setting | Behaviour | Runtime target |
 |---|---|---|
-| `prototype` (default) | Uses `TRACKED_ARTISTS`, 1 TM country, 2 date chunks, 5 setlist pages/artist | < 5 min |
-| `production` | All 5 markets (US,CA,GB,DE,IT), 4 quarterly date chunks, 80 setlist pages, artists derived from TM events | < 1 hr |
+| `prototype` (default) | Uses `TRACKED_ARTISTS`, 1 TM country, 2 date chunks, 5 setlist pages/artist, 5 TM pages/chunk | < 5 min |
+| `production` | All 5 markets (US,CA,GB,DE,IT), 12 monthly date chunks, auto-pagination (all TM pages), 80 setlist pages, artists derived from TM events | < 1 hr |
 
 Switch mode by setting `PIPELINE_MODE=production` in your `.env`.
 
@@ -37,7 +37,8 @@ make run-dlt
 
 - **MusicBrainz cache**: Artist resolutions are cached in GCS (`gs://<DATA_LAKE_BUCKET>/cache/mb_artist_cache.json`). Subsequent runs skip API calls for already-resolved artists. The cache uses upsert semantics — no duplicates.
 - **Setlist.fm cutoff**: Only setlists from year 2000 onward are ingested. Older data is filtered in both the pipeline and the dbt staging model.
-- **TM date range**: Dynamically set to today → 1 year forward (not hardcoded). The year is chunked into quarterly windows to overcome TM's ~1000 result limit per query.
+- **TM date range**: Dynamically set to today → 1 year forward (not hardcoded). Production uses 12 monthly chunks; prototype uses 2 semi-annual chunks. Monthly chunking keeps each window well under the TM API’s ~1000 result limit.
+- **TM auto-pagination**: In production mode (`TICKETMASTER_MAX_PAGES=0`), the pipeline fetches all available pages per chunk until the API returns empty results. This guarantees complete event capture for every market. Prototype caps at 5 pages per chunk for speed.
 - **TM event filtering**: Cancelled/postponed events are excluded. Events without a MusicBrainz artist match are dropped. Additionally, only genuine music artist types (Person, Group, Orchestra, Choir) are kept — this filters out non-artist entries like charity events.
 - **dlt merge**: All three resources use `write_disposition="merge"` with primary keys (`event_id`, `setlist_id`, `mbid`). Re-running the pipeline does NOT create duplicate rows.
 - **Orchestration**: `PIPELINE_MODE` is a standard env var that any orchestrator (Kestra, Airflow, Bruin) can pass. See `kestra/flows/concert_pipeline_daily.yml` for an example.
@@ -56,7 +57,7 @@ make run-dlt
 
 ## Optional tuning
 
-- `TICKETMASTER_MAX_PAGES` (default `5`)
+- `TICKETMASTER_MAX_PAGES` (default `5` prototype, `0` = unlimited production)
 - `TICKETMASTER_PAGE_SIZE` (default `200`)
 - `TICKETMASTER_COUNTRY_CODES` (default `US,CA,GB,DE,IT` in production, first country only in prototype)
 - `SETLISTFM_MAX_PAGES` (default `80` production, `5` prototype)

@@ -2,7 +2,8 @@
 
 Supports two pipeline modes controlled by PIPELINE_MODE env var:
   - prototype: small dataset, fast (<5 min). Uses TRACKED_ARTISTS, 1 TM country, 5 setlist pages.
-  - production: full dataset (<1 hr). All 5 markets (US,CA,GB,DE,IT), 80 setlist pages, live artist discovery.
+  - production: full dataset (<1 hr). All 5 markets (US,CA,GB,DE,IT), monthly date chunks with
+    auto-pagination (fetches all pages per chunk), 80 setlist pages, live artist discovery.
 """
 
 from __future__ import annotations
@@ -244,9 +245,13 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
         raise ValueError("TICKETMASTER_API_KEY is required for Ticketmaster ingestion.")
 
     mode = _pipeline_mode()
-    max_pages = int(os.getenv("TICKETMASTER_MAX_PAGES", "5"))
     page_size = int(os.getenv("TICKETMASTER_PAGE_SIZE", "200"))
     min_upcoming = int(os.getenv("TICKETMASTER_MIN_UPCOMING_EVENTS", "3"))
+
+    # In prototype mode, cap pages to keep runs fast. In production mode,
+    # auto-paginate until the API returns no more results (max_pages=0 means unlimited).
+    max_pages_default = "5" if mode == "prototype" else "0"
+    max_pages = int(os.getenv("TICKETMASTER_MAX_PAGES", max_pages_default))
 
     # Country codes: multi-country in production, single (first) in prototype
     all_countries_str = os.getenv("TICKETMASTER_COUNTRY_CODES", DEFAULT_PRODUCTION_COUNTRIES)
@@ -256,18 +261,20 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
     else:
         countries = all_countries[:1]  # prototype: only first country for speed
 
-    # Dynamic date range: today -> 1 year forward, chunked into quarters
-    # TM API limits results to ~1000 per query. Chunking into quarters ensures
-    # we get events spread across the entire year, not just the next few days.
+    # Dynamic date range: today -> 1 year forward, chunked to stay under
+    # the TM API's ~1000 results-per-query limit.
+    #   Production: 12 monthly chunks — each chunk is small enough to fit
+    #               within the API limit even for the busiest markets.
+    #   Prototype:  2 semi-annual chunks for speed.
     now = datetime.now(timezone.utc)
     if mode == "production":
-        # 4 quarterly chunks for full year coverage
+        chunk_days = 31  # ~monthly
+        num_chunks = 12
         date_chunks = [
-            (now + timedelta(days=i * 91), now + timedelta(days=min((i + 1) * 91, 365)))
-            for i in range(4)
+            (now + timedelta(days=i * chunk_days), now + timedelta(days=min((i + 1) * chunk_days, 365)))
+            for i in range(num_chunks)
         ]
     else:
-        # Prototype: 2 chunks (6 months) for reasonable spread
         date_chunks = [
             (now, now + timedelta(days=182)),
             (now + timedelta(days=182), now + timedelta(days=365)),
@@ -283,7 +290,7 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
 
     _status(
         f"Fetching Ticketmaster events countries={','.join(countries)}, "
-        f"pages<={max_pages}/chunk, chunks={len(date_chunks)}, "
+        f"pages<={'unlimited' if max_pages == 0 else max_pages}/chunk, chunks={len(date_chunks)}, "
         f"page_size={page_size}, min_upcoming={min_upcoming}, "
         f"date_range={range_start}..{range_end}"
     )
@@ -295,7 +302,10 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
             end_dt = chunk_end.strftime("%Y-%m-%dT%H:%M:%SZ")
             _status(f"  Chunk {chunk_idx + 1}/{len(date_chunks)}: {start_dt[:10]}..{end_dt[:10]}")
 
-            for page in range(max_pages):
+            page = 0
+            while True:
+                if max_pages > 0 and page >= max_pages:
+                    break
                 data = _http_json(
                     TICKETMASTER_EVENTS_URL,
                     params={
@@ -369,6 +379,8 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
                             "extracted_at": extracted_at,
                         }
                     )
+
+                page += 1
 
     _status(f"Prepared Ticketmaster rows: {len(rows)} (skipped {skipped})")
     return rows

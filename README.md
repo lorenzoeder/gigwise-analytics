@@ -21,10 +21,10 @@ This project builds an end-to-end data pipeline that ingests concert and setlist
 | Data ingestion | dlt API ingestion orchestrated by Bruin (DAG: ingestion → staging SQL → quality checks → dbt build), scheduled by Kestra |
 | Data warehouse | BigQuery star schema with partitioning and clustering strategy |
 | Transformations | dbt staging, intermediate, core, and marts layers |
-| Dashboard | Streamlit dashboard with 2 meaningful tiles |
+| Dashboard | Streamlit dashboard with 2 core tiles + optional Spark/Kafka tiles |
 | Reproducibility | Docker Compose, Makefile, env template, and step-by-step setup |
-| Batch processing | Spark job for batch join of raw sources from GCS |
-| Streaming | Kafka (Redpanda) broker + consumer for real-time event ingestion demo |
+| Batch processing | PySpark artist similarity job (production-only, runs locally) |
+| Streaming | Kafka (Redpanda) producer polls TM API for live event updates → consumer writes to BigQuery streaming dataset |
 
 ## 3. Why These Tools
 
@@ -63,12 +63,20 @@ flowchart LR
 		DLT --> BQRAW[(BigQuery raw)]
 		BQRAW --> SQL[SQL Staging + Quality]
 		SQL --> DBT[dbt Core Models]
+		DBT --> SPARK[PySpark Similarity\nproduction-only]
 	end
 
 	DBT --> BQANA[(BigQuery analytics)]
+	SPARK --> BQANA
 	BQANA --> ST[Streamlit Dashboard]
+	BQSTR -.-> ST
 
 	KE[Kestra Scheduler] --> Bruin
+
+	TM -.->|polling| KP[Kafka Producer]
+	KP --> KF{{Kafka / Redpanda}}
+	KF --> KC[Kafka Consumer]
+	KC --> BQSTR[(BigQuery streaming)]
 ```
 
 ## 6. Repository Structure
@@ -91,7 +99,7 @@ gigwise-analytics/
 │       ├── ingestion/       (run_dlt_ingestion.py)
 │       ├── staging/         (stg_concerts_union.sql)
 │       ├── quality/         (check_event_dates.sql)
-│       └── transformation/  (run_dbt_build.py)
+│       └── transformation/  (run_dbt_build.py, run_spark_enrichment.py)
 ├── dlt/
 │   ├── ingest_pipeline.py
 │   └── README.md
@@ -99,7 +107,8 @@ gigwise-analytics/
 │   └── flows/
 │       └── concert_pipeline_daily.yml
 ├── spark_jobs/
-│   └── join_raw_sources.py
+│   ├── compute_artist_similarity.py
+│   └── run_standalone.py
 ├── dbt/
 │   ├── dbt_project.yml
 │   ├── profiles.yml
@@ -123,17 +132,15 @@ gigwise-analytics/
 
 ## 7. Batch vs Stream Decision
 
-Primary path: batch.
+Primary path: batch. Spark and Kafka are integrated as production add-ons.
 
-Spark and Kafka are included to demonstrate both processing paradigms:
-
-- **Batch (primary):** dlt → BigQuery → dbt → Streamlit. Spark job demonstrates batch join of raw sources from GCS.
-- **Streaming (supplementary):** Kafka (Redpanda) broker + consumer for real-time event ingestion. BigQuery `streaming` dataset provisioned for landing.
+- **Batch (primary):** dlt → BigQuery → dbt → Streamlit. PySpark computes artist repertoire similarity as an additional production-only enrichment step after dbt, writing results back to BigQuery.
+- **Streaming (add-on):** Kafka producer polls Ticketmaster Discovery API for real-time event updates and publishes to Redpanda. Kafka consumer streams those events to BigQuery `streaming.live_event_updates` table. Fully toggleable via `make run-streaming` / `make stop-streaming`.
 
 Reasoning for batch as primary path:
 - Setlist and artist enrichment data changes on daily cadence, not second-by-second
 - Batch improves cost control and reproducibility for peer review
-- Zoomcamp criteria accept either batch or streaming
+- Spark and Kafka run as genuine pipeline components, not demos
 
 ## 8. Data Model Overview
 
@@ -147,16 +154,21 @@ Marts for dashboard tiles:
 - `mart_artist_touring_intensity`: touring intensity by artist, genre, and country (Tile 1)
 - `mart_artist_yearly_repertoire`: unique songs played per artist per year (Tile 2)
 - `mart_artist_setlist_freshness`: percentage of first-time songs per artist per year (Freshness Index)
+- `spark_artist_similarity`: pairwise artist similarity by shared songs (Spark, production only)
 
 ## 9. Dashboard
 
-The Streamlit app contains two core tiles:
+The Streamlit app contains two core tiles, plus optional Spark and Kafka sections:
 
 1. **Artist Touring Intensity**: Altair bar charts showing which artists have the most upcoming concerts across countries, with genre breakdown. Both charts sorted descending by concert count. Shows explicit date range of upcoming concerts.
 
 2. **Setlist Repertoire Over Time**: per-artist bar chart of unique songs played each year, revealing how repertoire evolves over touring history.
 
 3. **Setlist Freshness Index**: per-artist analysis showing what percentage of each year's setlist consists of songs appearing for the first time in the dataset. High freshness = fresh repertoire; low freshness = predictable setlist. First year is excluded (always 100%).
+
+4. **Similar Artists (Shared Repertoire)** *(optional, production only)*: when `spark_artist_similarity` exists, shows a horizontal bar chart of the top 10 most similar artists to the selected artist, ranked by Jaccard similarity score based on shared concert songs.
+
+5. **Live Event Stream** *(optional, when streaming is running)*: when `streaming.live_event_updates` exists, shows a full-width section with real-time event metrics, status breakdown chart, and recent event updates table.
 
 ## 10. Data Quality Controls
 
@@ -247,6 +259,7 @@ Included checks:
 - **MusicBrainz genre coverage**: ~69% of artists have genre tags. Depends on community tagging.
 - **Setlist.fm rate limits**: API returns 429 on rapid requests; pipeline retries with backoff.
 - **Setlist.fm historical cutoff**: Only setlists from year 2000 onward are ingested (pipeline) and queried (dbt staging).
+- **Ticketmaster auto-pagination**: In production mode, the pipeline uses monthly date chunks (12) and auto-paginates until the API returns no more results, ensuring complete event capture. Prototype mode uses a fixed 5-page cap for speed.
 - **Pipeline mode toggle**: Set `PIPELINE_MODE=prototype` (default, <5 min) or `PIPELINE_MODE=production` (<1 hr) in `.env` or via any orchestrator env var (see `kestra/flows/concert_pipeline_daily.yml`).
 
 ## 15. Current Metrics
