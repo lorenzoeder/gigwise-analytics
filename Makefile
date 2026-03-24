@@ -58,8 +58,9 @@ wipe-ingestion:
 	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.setlistfm_setlists\`" && \
 	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.musicbrainz_artists\`" && \
 	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_STREAMING.live_event_updates\`" && \
+	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_ANALYTICS.spark_artist_similarity\`" && \
 	bq query --nouse_legacy_sql "DROP VIEW IF EXISTS \`$$GCP_PROJECT_ID.$$BQ_DATASET_STAGING.stg_concerts_union\`"
-	@echo "Ingestion data wiped: raw source tables truncated and staging view dropped."
+	@echo "Ingestion data wiped: raw source tables truncated, materialized analytics tables truncated, staging view dropped."
 
 run-dlt:
 	cd $(ROOT_DIR) && set -a && source .env && set +a && PYTHONUNBUFFERED=1 uv run python $(ROOT_DIR)dlt/ingest_pipeline.py
