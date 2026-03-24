@@ -86,13 +86,13 @@ gigwise-analytics/
 │   ├── variables.tf
 │   ├── main.tf
 │   └── outputs.tf
-├── bruin_pipeline/
+├── bruin/
 │   ├── pipeline.yml
 │   └── assets/
 │       ├── ingestion/   (run_dlt_ingestion.py)
 │       ├── staging/     (stg_concerts_union.sql)
 │       └── quality/     (check_event_dates.sql)
-├── dlt_pipeline/
+├── dlt/
 │   ├── ingest_pipeline.py
 │   └── README.md
 ├── kestra/
@@ -100,7 +100,7 @@ gigwise-analytics/
 │       └── concert_pipeline_daily.yml
 ├── spark_jobs/
 │   └── join_raw_sources.py
-├── dbt_concert/
+├── dbt/
 │   ├── dbt_project.yml
 │   ├── profiles.yml
 │   ├── models/
@@ -110,7 +110,7 @@ gigwise-analytics/
 │   │   ├── core/        (dim_artist, fact_concert)
 │   │   └── marts/       (mart_artist_touring_intensity, mart_artist_daily_activity, mart_artist_yearly_repertoire, mart_artist_setlist_staleness)
 │   └── tests/
-├── dashboard/
+├── streamlit/
 │   └── streamlit_app.py
 └── docs/
     ├── index.md
@@ -118,9 +118,7 @@ gigwise-analytics/
     ├── ingestion_design_and_rationale.md
     ├── dbt_models_and_logic.md
     ├── bruin_orchestration_and_quality.md
-    ├── critical_review_and_next_steps.md
-    ├── current_state_assessment.md
-    └── personal_ops_guide.md (gitignored)
+    └── critical_review_and_next_steps.md
 ```
 
 ## 7. Batch vs Stream Decision

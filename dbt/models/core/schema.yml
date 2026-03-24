@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: dim_artist
+    columns:
+      - name: artist_id
+        tests:
+          - not_null
+
+  - name: fact_concert
+    columns:
+      - name: concert_id
+        tests:
+          - not_null
+      - name: event_date
+        tests:
+          - not_null

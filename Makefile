@@ -50,29 +50,29 @@ destroy-infra:
 	cd $(ROOT_DIR)terraform && terraform destroy -auto-approve -var "gcp_project_id=$$GCP_PROJECT_ID" -var "gcp_region=$$GCP_REGION" -var "existing_pipeline_sa_email=$${EXISTING_PIPELINE_SA_EMAIL:-}"
 
 run-dlt:
-	cd $(ROOT_DIR) && set -a && source .env && set +a && PYTHONUNBUFFERED=1 uv run python $(ROOT_DIR)dlt_pipeline/ingest_pipeline.py
+	cd $(ROOT_DIR) && set -a && source .env && set +a && PYTHONUNBUFFERED=1 uv run python $(ROOT_DIR)dlt/ingest_pipeline.py
 
 run-dlt-dry:
-	cd $(ROOT_DIR) && set -a && source .env && set +a && PYTHONUNBUFFERED=1 uv run python $(ROOT_DIR)dlt_pipeline/ingest_pipeline.py --dry-run
+	cd $(ROOT_DIR) && set -a && source .env && set +a && PYTHONUNBUFFERED=1 uv run python $(ROOT_DIR)dlt/ingest_pipeline.py --dry-run
 
 run-bruin:
 	$(MAKE) -f $(MAKEFILE_PATH) bruin-check
-	cd $(ROOT_DIR) && set -a && source .env && set +a && cd bruin_pipeline && bruin run . --env dev
+	cd $(ROOT_DIR) && set -a && source .env && set +a && cd bruin && bruin run . --env dev
 
 run-bruin-dry:
 	$(MAKE) -f $(MAKEFILE_PATH) bruin-check
-	cd $(ROOT_DIR) && set -a && source .env && set +a && cd bruin_pipeline && bruin validate . --env dev --fast
+	cd $(ROOT_DIR) && set -a && source .env && set +a && cd bruin && bruin validate . --env dev --fast
 
 run-dbt-debug:
-	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt_concert && uv run dbt debug --target prod
+	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt && uv run dbt debug --target prod
 
 run-dbt:
 	$(MAKE) -f $(MAKEFILE_PATH) run-dbt-debug
-	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt_concert && uv run dbt deps && uv run dbt build --target prod $(DBT_BUILD_FLAGS)
+	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt && uv run dbt deps && uv run dbt build --target prod $(DBT_BUILD_FLAGS)
 
 run-dashboard:
 	cd $(ROOT_DIR) && mkdir -p logs && set -a && source .env && set +a && \
-	STREAMLIT_BROWSER_GATHER_USAGE_STATS=false nohup uv run streamlit run dashboard/streamlit_app.py > logs/dashboard.log 2>&1 & \
+	STREAMLIT_BROWSER_GATHER_USAGE_STATS=false nohup uv run streamlit run streamlit/streamlit_app.py > logs/dashboard.log 2>&1 & \
 	DASH_PID=$$!; echo "$$DASH_PID" > logs/dashboard.pid; \
 	echo "Started Streamlit in background (PID $$DASH_PID)"; \
 	echo "Logs: $(ROOT_DIR)logs/dashboard.log"
@@ -83,8 +83,8 @@ run-dashboard-logs:
 
 stop-dashboard:
 	@cd $(ROOT_DIR) && \
-	if pgrep -f "[s]treamlit run dashboard" > /dev/null 2>&1; then \
-		pkill -f "[s]treamlit run dashboard" 2>/dev/null; \
+	if pgrep -f "[s]treamlit run streamlit/streamlit_app.py" > /dev/null 2>&1; then \
+		pkill -f "[s]treamlit run streamlit/streamlit_app.py" 2>/dev/null; \
 		rm -f logs/dashboard.pid; \
 		echo "Stopped Streamlit dashboard"; \
 	else \
@@ -99,7 +99,7 @@ run-kafka:
 	docker compose up -d kafka kafka-ui
 
 test:
-	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt_concert && uv run dbt test --target prod
+	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt && uv run dbt test --target prod
 
 lint:
 	cd terraform && terraform fmt -check && terraform validate
