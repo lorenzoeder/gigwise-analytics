@@ -1,9 +1,9 @@
 SHELL := /bin/bash
 MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 ROOT_DIR := $(dir $(MAKEFILE_PATH))
-DBT_BUILD_FLAGS ?= --full-refresh --fail-fast
+DBT_BUILD_FLAGS ?= --fail-fast
 
-.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra wipe-ingestion run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug run-dashboard run-dashboard-logs stop-dashboard run-spark run-streaming stop-streaming test lint fmt
+.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra wipe-ingestion wipe-all run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug run-dashboard run-dashboard-logs stop-dashboard run-spark run-streaming stop-streaming test lint fmt
 
 help:
 	@echo "Available targets:"
@@ -13,12 +13,13 @@ help:
 	@echo "  setup-infra     Initialize and apply Terraform"
 	@echo "  destroy-infra   Destroy Terraform-managed infrastructure"
 	@echo "  wipe-ingestion  Truncate raw ingestion tables + drop staging view (requires CONFIRM_WIPE=1)"
+	@echo "  wipe-all        Wipe ALL data: raw, dlt state, staging, dbt models, streaming, Spark (requires CONFIRM_WIPE=1)"
 	@echo "  run-dlt         Load Ticketmaster/Setlist.fm/MusicBrainz via dlt"
 	@echo "  run-dlt-dry     Fetch all ingestion sources (no load)"
 	@echo "  run-bruin       Full pipeline: dlt ingestion + SQL staging + quality + dbt build"
 	@echo "  run-bruin-dry   Validate Bruin pipeline only (no execution)"
 	@echo "  run-dbt-debug   Validate dbt profile/connection"
-	@echo "  run-dbt         Run dbt models and tests (standalone)"
+	@echo "  run-dbt         Run dbt models and tests (incremental by default; full refresh: make run-dbt DBT_BUILD_FLAGS='--full-refresh --fail-fast')"
 	@echo "  run-dashboard   Start Streamlit dashboard (background, logs to logs/dashboard.log)"
 	@echo "  run-dashboard-logs     Tail Streamlit dashboard logs"
 	@echo "  stop-dashboard         Stop background Streamlit process"
@@ -61,6 +62,35 @@ wipe-ingestion:
 	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_ANALYTICS.spark_artist_similarity\`" && \
 	bq query --nouse_legacy_sql "DROP VIEW IF EXISTS \`$$GCP_PROJECT_ID.$$BQ_DATASET_STAGING.stg_concerts_union\`"
 	@echo "Ingestion data wiped: raw source tables truncated, materialized analytics tables truncated, staging view dropped."
+
+wipe-all:
+	@test "$$CONFIRM_WIPE" = "1" || (echo "Refusing to wipe data. Re-run with: make wipe-all CONFIRM_WIPE=1" && exit 1)
+	cd $(ROOT_DIR) && set -a && source .env && set +a && \
+	echo "--- Truncating raw tables ---" && \
+	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.ticketmaster_events\`" && \
+	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.setlistfm_setlists\`" && \
+	bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW.musicbrainz_artists\`" && \
+	echo "--- Clearing dlt state ---" && \
+	(bq query --nouse_legacy_sql "DELETE FROM \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW._dlt_loads\` WHERE true" 2>/dev/null || true) && \
+	(bq query --nouse_legacy_sql "DELETE FROM \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW._dlt_pipeline_state\` WHERE true" 2>/dev/null || true) && \
+	(bq query --nouse_legacy_sql "DELETE FROM \`$$GCP_PROJECT_ID.$$BQ_DATASET_RAW._dlt_version\` WHERE true" 2>/dev/null || true) && \
+	echo "--- Dropping Bruin staging view ---" && \
+	bq query --nouse_legacy_sql "DROP VIEW IF EXISTS \`$$GCP_PROJECT_ID.$$BQ_DATASET_STAGING.stg_concerts_union\`" && \
+	echo "--- Dropping dbt models ---" && \
+	bq rm -f -t "$$GCP_PROJECT_ID:$$BQ_DATASET_ANALYTICS.stg_ticketmaster__events" && \
+	bq rm -f -t "$$GCP_PROJECT_ID:$$BQ_DATASET_ANALYTICS.stg_setlistfm__setlists" && \
+	bq rm -f -t "$$GCP_PROJECT_ID:$$BQ_DATASET_ANALYTICS.int_concerts_unified" && \
+	bq rm -f -t "$$GCP_PROJECT_ID:$$BQ_DATASET_ANALYTICS.dim_artist" && \
+	bq rm -f -t "$$GCP_PROJECT_ID:$$BQ_DATASET_ANALYTICS.fact_concert" && \
+	bq rm -f -t "$$GCP_PROJECT_ID:$$BQ_DATASET_ANALYTICS.mart_artist_setlist_freshness" && \
+	bq rm -f -t "$$GCP_PROJECT_ID:$$BQ_DATASET_ANALYTICS.mart_artist_touring_intensity" && \
+	bq rm -f -t "$$GCP_PROJECT_ID:$$BQ_DATASET_ANALYTICS.mart_artist_yearly_repertoire" && \
+	echo "--- Truncating streaming table ---" && \
+	(bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_STREAMING.live_event_updates\`" 2>/dev/null || true) && \
+	echo "--- Truncating Spark output ---" && \
+	(bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_ANALYTICS.spark_artist_similarity\`" 2>/dev/null || true)
+	@echo ""
+	@echo "All data wiped. Rebuild with: make run-bruin && make run-spark"
 
 run-dlt:
 	cd $(ROOT_DIR) && set -a && source .env && set +a && PYTHONUNBUFFERED=1 uv run python $(ROOT_DIR)dlt/ingest_pipeline.py

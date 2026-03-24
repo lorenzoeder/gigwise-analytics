@@ -11,7 +11,8 @@ SELECT
   CAST(NULL AS INT64) AS songs_played_count,
   CAST(NULL AS STRING) AS songs_played,
   CAST(NULL AS STRING) AS tour_id,
-  'ticketmaster' AS source
+  'ticketmaster' AS source,
+  extracted_at
 FROM {{ ref('stg_ticketmaster__events') }}
 
 UNION ALL
@@ -29,5 +30,6 @@ SELECT
   songs_played_count,
   songs_played,
   tour_id,
-  'setlistfm' AS source
+  'setlistfm' AS source,
+  extracted_at
 FROM {{ ref('stg_setlistfm__setlists') }}

@@ -7,7 +7,8 @@ SELECT
   CAST(e.city AS STRING) AS city,
   DATE(e.event_date) AS event_date,
   CAST(e.country_code AS STRING) AS country,
-  CAST(e.event_status AS STRING) AS event_status
+  CAST(e.event_status AS STRING) AS event_status,
+  CAST(e.extracted_at AS TIMESTAMP) AS extracted_at
 FROM {{ source('raw', 'ticketmaster_events') }} e
 LEFT JOIN {{ source('raw', 'musicbrainz_artists') }} m
   ON LOWER(TRIM(e.artist_name)) = LOWER(TRIM(m.artist_name))

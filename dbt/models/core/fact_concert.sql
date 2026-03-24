@@ -1,3 +1,11 @@
+{{
+  config(
+    materialized='incremental',
+    unique_key='concert_id',
+    on_schema_change='sync_all_columns'
+  )
+}}
+
 SELECT
   c.concert_id,
   d.artist_id,
@@ -16,3 +24,6 @@ SELECT
 FROM {{ ref('int_concerts_unified') }} c
 LEFT JOIN {{ ref('dim_artist') }} d
   ON c.artist_mbid = d.mbid
+{% if is_incremental() %}
+WHERE c.extracted_at > (SELECT MAX(loaded_at) FROM {{ this }})
+{% endif %}
