@@ -184,8 +184,8 @@ with tile2:
     # ── Combined Repertoire + Freshness chart ──
     st.caption(
         "How many unique songs does each artist play per year of touring? (data from 2000 onward)  \n"
-        "The line shows the Freshness Index: % of songs appearing for the first time in the dataset "
-        "(high = fresh repertoire, low = predictable setlist)."
+        "The line shows the Freshness Index: % of songs appearing for the first time in the dataset.  \n"
+        "(high = fresh repertoire, low = predictable setlist)"
     )
 
     if not df_repertoire.empty and selected_artist:
@@ -281,7 +281,8 @@ with tile2:
             st.subheader(f"Artists Playing Same Songs As {selected_artist}")
             st.caption(
                 "Artists with the most overlap in live concert setlists, "
-                "ranked by Jaccard similarity (shared songs \u00f7 combined unique songs)."
+                "ranked by Jaccard similarity.  \n"
+                "(shared songs \u00f7 combined unique songs)"
             )
 
             sim_chart = (
