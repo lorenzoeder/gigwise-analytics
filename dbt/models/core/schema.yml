@@ -2,16 +2,38 @@ version: 2
 
 models:
   - name: dim_artist
+    description: One row per unique artist, keyed on MusicBrainz ID.
     columns:
       - name: artist_id
         tests:
           - not_null
+          - unique
+      - name: mbid
+        tests:
+          - not_null
+          - unique
+      - name: artist_name
+        tests:
+          - not_null
 
   - name: fact_concert
+    description: Unified concert events from Ticketmaster and Setlist.fm.
     columns:
       - name: concert_id
         tests:
           - not_null
+          - unique
       - name: event_date
         tests:
           - not_null
+      - name: source
+        tests:
+          - accepted_values:
+              values: ['ticketmaster', 'setlistfm']
+      - name: artist_id
+        tests:
+          - relationships:
+              to: ref('dim_artist')
+              field: artist_id
+              config:
+                where: "artist_id IS NOT NULL"

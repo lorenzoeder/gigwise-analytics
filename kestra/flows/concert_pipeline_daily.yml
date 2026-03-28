@@ -27,15 +27,14 @@ tasks:
       volumes:
         - /workspaces/gigwise-analytics:/workspaces/gigwise-analytics:rw
         - /home/codespace/.config/gcloud:/root/.config/gcloud:rw
-        - /home/codespace/.cache/uv:/root/.cache/uv
     env:
-      PIPELINE_MODE: "{{ inputs.pipeline_mode }}"
       GOOGLE_APPLICATION_CREDENTIALS: /root/.config/gcloud/application_default_credentials.json
+      UV_PROJECT_ENVIRONMENT: /workspaces/gigwise-analytics/.kestra-venv
+      CLOUDSDK_CORE_DISABLE_FILE_LOGGING: "1"
     commands:
-      - apt-get update -qq && apt-get install -y -qq make > /dev/null 2>&1
       - curl -fsSL https://raw.githubusercontent.com/bruin-data/bruin/main/install.sh | bash 2>/dev/null
       - export PATH="/workspaces/gigwise-analytics/google-cloud-sdk/bin:$HOME/.local/bin:$HOME/.bruin/bin:$PATH"
-      - cd /workspaces/gigwise-analytics && set -a && . ./.env && set +a && make run-bruin
+      - cd /workspaces/gigwise-analytics && set -a && . ./.env && set +a && export PIPELINE_MODE="{{ inputs.pipeline_mode }}" && cd bruin && bruin run . --env dev
 
 triggers:
   - id: daily_schedule

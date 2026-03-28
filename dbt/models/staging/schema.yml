@@ -1,0 +1,30 @@
+version: 2
+
+models:
+  - name: stg_ticketmaster__events
+    description: Cleaned Ticketmaster events with deduplicated event IDs.
+    columns:
+      - name: concert_id
+        tests:
+          - not_null
+          - unique
+      - name: event_date
+        tests:
+          - not_null
+      - name: country
+        tests:
+          - not_null
+
+  - name: stg_setlistfm__setlists
+    description: Cleaned Setlist.fm setlists with parsed dates.
+    columns:
+      - name: setlist_id
+        tests:
+          - not_null
+          - unique
+      - name: event_date
+        tests:
+          - not_null
+      - name: artist_name
+        tests:
+          - not_null

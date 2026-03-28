@@ -128,13 +128,15 @@ def _http_json(
     headers: dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
     data: bytes | None = None,
+    max_retries: int | None = None,
 ) -> dict[str, Any]:
     if params:
         query = parse.urlencode({k: v for k, v in params.items() if v is not None})
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}{query}"
 
-    max_retries = int(os.getenv("HTTP_MAX_RETRIES", "3"))
+    if max_retries is None:
+        max_retries = int(os.getenv("HTTP_MAX_RETRIES", "3"))
     backoff_seconds = float(os.getenv("HTTP_RETRY_BACKOFF_SECONDS", "1.5"))
 
     payload = ""
@@ -148,14 +150,19 @@ def _http_json(
             body = exc.read().decode("utf-8", errors="replace")[:500]
             retryable = exc.code in {429, 500, 502, 503, 504}
             if retryable and attempt < max_retries:
-                wait_for = backoff_seconds * attempt
+                # Honour Retry-After header if present
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                if retry_after and retry_after.isdigit():
+                    wait_for = int(retry_after) + 1
+                else:
+                    wait_for = backoff_seconds * (2 ** (attempt - 1))  # exponential backoff
                 _status(f"Retryable HTTP {exc.code} for {url}; retry {attempt}/{max_retries} in {wait_for:.1f}s")
                 time.sleep(wait_for)
                 continue
             raise RuntimeError(f"HTTP {exc.code} calling {url}. Response: {body}") from exc
         except error.URLError as exc:
             if attempt < max_retries:
-                wait_for = backoff_seconds * attempt
+                wait_for = backoff_seconds * (2 ** (attempt - 1))
                 _status(f"Network error for {url}; retry {attempt}/{max_retries} in {wait_for:.1f}s")
                 time.sleep(wait_for)
                 continue
@@ -387,9 +394,16 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
 
 
 def _ticketmaster_touring_artists(ticketmaster_rows: list[dict[str, Any]]) -> list[str]:
+    """Return top artists ranked by event count (descending)."""
     max_artists = int(os.getenv("MAX_TOURING_ARTISTS", "100"))
-    names = sorted({(row.get("artist_name") or "").strip() for row in ticketmaster_rows if row.get("artist_name")})
-    return names[:max_artists]
+    counts: dict[str, int] = {}
+    for row in ticketmaster_rows:
+        name = (row.get("artist_name") or "").strip()
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    ranked = sorted(counts, key=lambda n: (-counts[n], n))
+    _status(f"Top touring artists: {', '.join(f'{n} ({counts[n]})' for n in ranked[:5])}...")
+    return ranked[:max_artists]
 
 
 # ── Setlist.fm ──────────────────────────────────────────────────────────
@@ -413,8 +427,14 @@ def _setlistfm_setlists(artist_mbids: dict[str, str]) -> list[dict[str, Any]]:
         "User-Agent": user_agent,
     }
 
+    # Setlist.fm rate limit: ~2 req/s for authenticated users.
+    # A small delay between requests avoids hitting 429s in the first place.
+    setlistfm_delay = float(os.getenv("SETLISTFM_REQUEST_DELAY", "0.6"))
+    setlistfm_retries = int(os.getenv("SETLISTFM_MAX_RETRIES", "8"))
+
     rows: list[dict[str, Any]] = []
-    _status(f"Fetching Setlist.fm setlists for {len(artist_mbids)} artists (max_pages={max_pages}, min_year={SETLISTFM_MIN_YEAR})")
+    skipped_artists: list[str] = []
+    _status(f"Fetching Setlist.fm setlists for {len(artist_mbids)} artists (max_pages={max_pages}, min_year={SETLISTFM_MIN_YEAR}, delay={setlistfm_delay}s)")
 
     for index, (artist_name, mbid) in enumerate(artist_mbids.items(), start=1):
         _status(f"Setlist.fm artist {index}/{len(artist_mbids)}: {artist_name} (mbid={'yes' if mbid else 'no'})")
@@ -424,18 +444,24 @@ def _setlistfm_setlists(artist_mbids: dict[str, str]) -> list[dict[str, Any]]:
         for page in range(1, max_pages + 1):
             if hit_cutoff:
                 break
+            time.sleep(setlistfm_delay)
             try:
                 if mbid:
                     url = SETLISTFM_ARTIST_URL.format(mbid=mbid)
-                    data = _http_json(url, headers=headers, params={"p": page})
+                    data = _http_json(url, headers=headers, params={"p": page}, max_retries=setlistfm_retries)
                 else:
                     data = _http_json(
                         SETLISTFM_SEARCH_URL,
                         headers=headers,
                         params={"artistName": artist_name, "p": page},
+                        max_retries=setlistfm_retries,
                     )
             except RuntimeError as exc:
                 if "HTTP 404" in str(exc):
+                    break
+                if "HTTP 429" in str(exc):
+                    _status(f"  Rate-limited on {artist_name} after retries; skipping remaining pages")
+                    skipped_artists.append(artist_name)
                     break
                 raise
             setlists = data.get("setlist") or []
@@ -502,6 +528,8 @@ def _setlistfm_setlists(artist_mbids: dict[str, str]) -> list[dict[str, Any]]:
 
     rows = [row for row in rows if row.get("setlist_id")]
 
+    if skipped_artists:
+        _status(f"Setlist.fm: skipped {len(skipped_artists)} artists due to rate limits: {', '.join(skipped_artists[:10])}")
     _status(f"Prepared Setlist.fm rows: {len(rows)}")
     return rows
 
@@ -545,8 +573,6 @@ def _build_rows() -> dict[str, list[dict[str, Any]]]:
     cache_hits_before = len(mb_cache)
 
     ticketmaster_rows = _ticketmaster_events()
-    artists = _selected_artists(ticketmaster_rows)
-    _status(f"Selected {len(artists)} artists for ingestion")
 
     now = datetime.now(timezone.utc)
     run_date = now.date().isoformat()
@@ -555,38 +581,11 @@ def _build_rows() -> dict[str, list[dict[str, Any]]]:
     mb_rows: list[dict[str, Any]] = []
     mbid_by_artist_name: dict[str, str] = {}
     artist_type_by_name: dict[str, str | None] = {}
-    artist_mbid_map: dict[str, str] = {}
 
-    for idx, artist_name in enumerate(artists, start=1):
-        _status(f"Resolving artist {idx}/{len(artists)}: {artist_name}")
-        try:
-            resolved = _resolve_artist_cached(artist_name, mb_user_agent, mb_api_key, mb_cache)
-        except Exception as exc:
-            raise RuntimeError(f"Failed resolving artist '{artist_name}': {exc}") from exc
-
-        mb_rows.append(
-            {
-                "artist_name": resolved.artist_name,
-                "mbid": resolved.mbid,
-                "origin_country": resolved.origin_country,
-                "formation_year": resolved.formation_year,
-                "artist_type": resolved.artist_type,
-                "primary_genre": resolved.primary_genre,
-                "extracted_at": extracted_at,
-            }
-        )
-
-        normalized_name = _normalize_artist_name(resolved.artist_name)
-        if resolved.mbid and normalized_name:
-            mbid_by_artist_name[normalized_name] = resolved.mbid
-            artist_type_by_name[normalized_name] = resolved.artist_type
-
-        artist_mbid_map[artist_name] = resolved.mbid or ""
-
-    setlist_rows = _setlistfm_setlists(artist_mbid_map)
-
-    # Resolve unique Ticketmaster artists via MusicBrainz (with cache)
-    # Production: resolve all. Prototype: limited to keep first run under 5 min.
+    # ── Phase 1: Resolve ALL unique TM artists via MusicBrainz ──────────
+    # In production, we need to know which artists are genuine music acts
+    # *before* selecting the top artists for Setlist.fm ingestion.
+    # In prototype mode, resolve a limited set for speed.
     default_limit = "0" if mode == "production" else "50"
     resolve_limit = int(os.getenv("TICKETMASTER_RESOLVE_ARTISTS_LIMIT", default_limit))
     unique_ticketmaster_artists = sorted(
@@ -602,7 +601,9 @@ def _build_rows() -> dict[str, list[dict[str, Any]]]:
             f"Resolving Ticketmaster artists (MusicBrainz) "
             f"(limit={'all' if resolve_limit == 0 else resolve_limit}, unique={len(unique_ticketmaster_artists)})"
         )
-        for artist_name in artists_to_resolve:
+        for idx, artist_name in enumerate(artists_to_resolve, start=1):
+            if idx % 50 == 0:
+                _status(f"  Resolved {idx}/{len(artists_to_resolve)} artists...")
             artist_key = _normalize_artist_name(artist_name)
             if artist_key in mbid_by_artist_name:
                 continue
@@ -625,12 +626,7 @@ def _build_rows() -> dict[str, list[dict[str, Any]]]:
                 }
             )
 
-    # Persist updated cache
-    _save_mb_cache(mb_cache)
-    cache_hits_after = len(mb_cache)
-    _status(f"MusicBrainz cache: {cache_hits_before} entries before, {cache_hits_after} after")
-
-    # Filter Ticketmaster rows: only keep genuine music artists with a MusicBrainz match
+    # ── Phase 2: Filter TM rows — genuine music artists only ───────────
     enriched_ticketmaster_rows: list[dict[str, Any]] = []
     no_mb_match = 0
     non_artist_type = 0
@@ -640,7 +636,6 @@ def _build_rows() -> dict[str, list[dict[str, Any]]]:
         if not mbid:
             no_mb_match += 1
             continue
-        # Only keep genuine music artist types (Person, Group, Orchestra, Choir)
         atype = artist_type_by_name.get(artist_key)
         if atype and atype not in _VALID_ARTIST_TYPES:
             non_artist_type += 1
@@ -653,6 +648,49 @@ def _build_rows() -> dict[str, list[dict[str, Any]]]:
         f"Ticketmaster: {len(enriched_ticketmaster_rows)} events with verified artist match, "
         f"{no_mb_match} dropped (no MB match), {non_artist_type} dropped (non-artist type)"
     )
+
+    # ── Phase 3: Select artists for Setlist.fm ingestion ────────────────
+    # Production: top N by event count from *filtered* TM rows (verified artists only).
+    # Prototype: use tracked artist list from env.
+    artists = _selected_artists(enriched_ticketmaster_rows)
+    _status(f"Selected {len(artists)} artists for Setlist.fm + MusicBrainz ingestion")
+
+    # Resolve selected artists (adds any not already in mb_rows)
+    artist_mbid_map: dict[str, str] = {}
+    for idx, artist_name in enumerate(artists, start=1):
+        artist_key = _normalize_artist_name(artist_name)
+        # Already resolved during TM resolution?
+        if artist_key in mbid_by_artist_name:
+            artist_mbid_map[artist_name] = mbid_by_artist_name[artist_key]
+            continue
+        _status(f"Resolving selected artist {idx}/{len(artists)}: {artist_name}")
+        try:
+            resolved = _resolve_artist_cached(artist_name, mb_user_agent, mb_api_key, mb_cache)
+        except Exception as exc:
+            raise RuntimeError(f"Failed resolving artist '{artist_name}': {exc}") from exc
+        mb_rows.append(
+            {
+                "artist_name": resolved.artist_name,
+                "mbid": resolved.mbid,
+                "origin_country": resolved.origin_country,
+                "formation_year": resolved.formation_year,
+                "artist_type": resolved.artist_type,
+                "primary_genre": resolved.primary_genre,
+                "extracted_at": extracted_at,
+            }
+        )
+        if resolved.mbid:
+            mbid_by_artist_name[artist_key] = resolved.mbid
+            artist_type_by_name[artist_key] = resolved.artist_type
+        artist_mbid_map[artist_name] = resolved.mbid or ""
+
+    # ── Phase 4: Setlist.fm ingestion ───────────────────────────────────
+    setlist_rows = _setlistfm_setlists(artist_mbid_map)
+
+    # Persist updated cache
+    _save_mb_cache(mb_cache)
+    cache_hits_after = len(mb_cache)
+    _status(f"MusicBrainz cache: {cache_hits_before} entries before, {cache_hits_after} after")
 
     _status(
         "Prepared rows: "
