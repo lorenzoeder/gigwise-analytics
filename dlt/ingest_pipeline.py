@@ -2,8 +2,10 @@
 
 Supports two pipeline modes controlled by PIPELINE_MODE env var:
   - prototype: small dataset, fast (<5 min). Uses TRACKED_ARTISTS, 1 TM country, 5 setlist pages.
-  - production: full dataset (<1 hr). All 5 markets (US,CA,GB,DE,IT), monthly date chunks with
-    auto-pagination (fetches all pages per chunk), 80 setlist pages, live artist discovery.
+  - production: full dataset (<30 min first run, <15 min subsequent). All 5 markets
+    (US,CA,GB,DE,IT), monthly date chunks, 10 setlist pages. Artist selection uses
+    name-heuristic pre-filter + MusicBrainz type/disambiguation post-filter. Only the
+    top ~100 touring candidates are resolved via MusicBrainz (not all unique TM artists).
 """
 
 from __future__ import annotations
@@ -11,9 +13,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import traceback
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -40,6 +44,66 @@ DEFAULT_PRODUCTION_COUNTRIES = "US,CA,GB,DE,IT"
 # MusicBrainz artist types considered genuine music artists
 _VALID_ARTIST_TYPES = {"Person", "Group", "Orchestra", "Choir"}
 
+# Name patterns that indicate non-genuine touring music artists.
+# Applied as a cheap pre-filter BEFORE any API-based resolution.
+_EXCLUDE_NAME_RE = re.compile(
+    r'(?i)'
+    r'(?:'
+    r'\btribut\w*\b'                # "Tribute", "Tributes"
+    r'|\bimpersonat\w*\b'            # "impersonator"
+    r'|\bcirque\b'                   # Cirque du Soleil etc.
+    r'|\bon\s+ice\b'                # "Disney on Ice" etc.
+    r'|\bday\s+out\s+with\b'        # "Day Out with Thomas" etc.
+    r'|LIVE\s+[\u2013\u2014-]'       # "MJ LIVE – ..." tribute format
+    r'|\bhologram\b'                # hologram shows
+    r'|\bthe\s+\w+\s+experience\b'  # "The Hendrix Experience" etc.
+    r'|\bopry\b'                    # Grand Ole Opry etc.
+    r'|\bcelebrat\w*\b'             # "A Celebration of ..."
+    r'|\bmusical\b'                 # "The Musical", musicals
+    r'|\bbroadway\b'               # Broadway shows
+    r'|\bspectacular\b'            # "Christmas Spectacular" etc.
+    r'|\bresidency\b'              # Vegas residencies
+    r'|\blegacy\b'                 # "Michael Jackson - Legacy" etc.
+    r'|\b(?:sounds?|songs?|music|echoes?|rumours?)\s+of\b'  # "Rumours of Fleetwood Mac" etc.
+    r'|\b(?:salute|homage)\s+to\b'  # "A Salute to the Stars"
+    r')')
+
+# Keywords in MusicBrainz disambiguation that indicate tribute/cover acts
+_TRIBUTE_DISAMBIG_KW = ("tribute", "cover band", "impersonat", "tribute band", "cover")
+
+
+def _is_likely_non_artist(name: str) -> bool:
+    """Heuristic check \u2014 True for names clearly not genuine touring artists."""
+    return bool(_EXCLUDE_NAME_RE.search(name))
+
+
+def _normalize_for_match(name: str) -> str:
+    """Aggressively normalize a name for MB match comparison.
+
+    Handles accented characters (e.g., León → leon), strips 'The' prefix,
+    removes punctuation, and collapses whitespace.
+    """
+    s = (name or "").strip()
+    # Decompose Unicode → strip combining marks (accents)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower()
+    s = re.sub(r'^the\s+', '', s)
+    # Normalize "&" → "and" BEFORE stripping punctuation so that
+    # "Jools Holland & His Orchestra" matches "... and His Orchestra"
+    s = re.sub(r'\s*&\s*', ' and ', s)
+    s = re.sub(r'[^a-z0-9\s]', '', s)  # strip punctuation
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _strip_tm_qualifier(name: str) -> str:
+    """Strip parenthetical location/tour qualifiers that Ticketmaster appends.
+
+    Examples: 'Donny Osmond (Las Vegas)' → 'Donny Osmond'
+              'Keith Urban (US Tour)'    → 'Keith Urban'
+    """
+    return re.sub(r'\s*\([^)]*\)\s*$', '', name).strip()
+
 
 def _pipeline_mode() -> str:
     """Return 'prototype' or 'production'."""
@@ -63,6 +127,8 @@ class ArtistResolution:
     artist_type: str | None
     primary_genre: str | None
     genres: list[str]
+    disambiguation: str | None = None
+    mb_name: str | None = None  # name returned by MB (for match validation)
 
 
 def _normalize_artist_name(name: str | None) -> str:
@@ -178,17 +244,94 @@ def _http_json(
 # ── MusicBrainz ─────────────────────────────────────────────────────────
 
 def _musicbrainz_artist(artist_name: str, user_agent: str, api_key: str | None = None) -> dict[str, Any] | None:
-    params = {"query": f"artist:{artist_name}", "fmt": "json", "limit": 1}
+    """Search MB for an artist, returning the best name-matched result from top 5.
+
+    MusicBrainz fuzzy search often returns wrong artists first (e.g., "J. Cole"
+    returns "Nat King Cole" at rank 1). We fetch 5 candidates and pick the one
+    whose name best matches the query.
+
+    Shadow-artist check: if the matched candidate has very few tags but a
+    much-more-established artist with a similar name also appears in the
+    results, the match is likely a cover/tribute act (e.g., "Australian
+    Bee Gees" shadowed by "Bee Gees"). In that case we return None.
+    """
+    clean_name = _strip_tm_qualifier(artist_name)
+    params = {"query": f"artist:{clean_name}", "fmt": "json", "limit": 5}
     if api_key:
         params["token"] = api_key
     data = _http_json(MUSICBRAINZ_URL, headers={"User-Agent": user_agent}, params=params)
-    artists = data.get("artists", [])
-    return artists[0] if artists else None
+    candidates = data.get("artists", [])
+    if not candidates:
+        return None
+
+    searched_norm = _normalize_for_match(clean_name)
+    if not searched_norm:
+        return None
+
+    matched: dict[str, Any] | None = None
+
+    # Pass 1: exact normalized match
+    for c in candidates:
+        if _normalize_for_match(c.get("name", "")) == searched_norm:
+            matched = c
+            break
+
+    # Pass 2: prefix match — only when the candidate name is LONGER than or equal
+    # to the searched name.  This prevents tribute acts like "Michael Jackson - Legacy"
+    # from prefix-matching the real "Michael Jackson" (searched is longer → no match).
+    if matched is None:
+        for c in candidates:
+            cand_norm = _normalize_for_match(c.get("name", ""))
+            if cand_norm and cand_norm.startswith(searched_norm) and len(cand_norm) >= len(searched_norm):
+                matched = c
+                break
+
+    if matched is None:
+        _status(f"  MB no name match in top 5 for {artist_name!r}: "
+                f"{[c.get('name') for c in candidates[:3]]}")
+        return None
+
+    # ── Shadow-artist check ─────────────────────────────────────────
+    # If the matched MB entry has very few tags and another candidate in the
+    # results is a well-established artist whose name is contained within
+    # the matched name, the match is almost certainly a cover/tribute act.
+    #   "Australian Bee Gees" (0 tags) + "Bee Gees" (15 tags) → cover act
+    # Direction: only trigger when the famous name is a SUBSTRING of the
+    # matched name (cover acts ADD qualifiers to the famous name).
+    # Threshold: the famous artist must have ≥10 tags to be considered
+    # "established enough" to cast a shadow.  This prevents false positives
+    # like Sugar (6) vs Sugar Ray (14) or Freya Skye (1) vs Skye (4).
+    matched_norm = _normalize_for_match(matched.get("name", ""))
+    matched_tags = len(matched.get("tags") or [])
+    for other in candidates:
+        if other is matched:
+            continue
+        other_norm = _normalize_for_match(other.get("name", ""))
+        other_tags = len(other.get("tags") or [])
+        if not other_norm or len(other_norm) < 4:
+            continue
+        # Famous name must be contained IN the matched name (not the reverse)
+        if other_norm not in matched_norm:
+            continue
+        # The shadow must be genuinely established (≥10 tags)
+        if other_tags >= 10 and other_tags >= matched_tags + 3:
+            _status(f"  MB shadow-artist detected: {matched.get('name')!r} ({matched_tags} tags) "
+                    f"shadowed by {other.get('name')!r} ({other_tags} tags)")
+            return None
+
+    return matched
 
 
 def _resolve_artist(artist_name: str, mb_user_agent: str, mb_api_key: str | None) -> ArtistResolution:
-    mb_artist = _musicbrainz_artist(artist_name, mb_user_agent, mb_api_key) or {}
+    mb_artist = _musicbrainz_artist(artist_name, mb_user_agent, mb_api_key)
+    if mb_artist is None:
+        return ArtistResolution(
+            artist_name=artist_name, mbid=None, origin_country=None,
+            formation_year=None, artist_type=None, primary_genre=None,
+            genres=[], disambiguation=None, mb_name=None,
+        )
 
+    mb_returned_name = mb_artist.get("name") or ""
     mb_begin_date = mb_artist.get("life-span", {}).get("begin") or ""
     formation_year = int(mb_begin_date[:4]) if len(mb_begin_date) >= 4 and mb_begin_date[:4].isdigit() else None
 
@@ -204,6 +347,8 @@ def _resolve_artist(artist_name: str, mb_user_agent: str, mb_api_key: str | None
         artist_type=mb_artist.get("type"),
         primary_genre=primary_genre,
         genres=[t.get("name") for t in sorted(mb_tags, key=lambda t: t.get("count", 0), reverse=True) if t.get("name")],
+        disambiguation=mb_artist.get("disambiguation"),
+        mb_name=mb_returned_name,
     )
 
 
@@ -217,15 +362,23 @@ def _resolve_artist_cached(
     key = _cache_key(artist_name)
     if key in cache:
         c = cache[key]
-        return ArtistResolution(
-            artist_name=c.get("artist_name", artist_name),
-            mbid=c.get("mbid"),
-            origin_country=c.get("origin_country"),
-            formation_year=c.get("formation_year"),
-            artist_type=c.get("artist_type"),
-            primary_genre=c.get("primary_genre"),
-            genres=c.get("genres", []),
-        )
+        # Invalidate stale cache entries that are missing newer fields
+        # (e.g., 'mb_name' added for match-quality validation).
+        if "mb_name" not in c:
+            _status(f"  Cache entry for {artist_name!r} is stale (missing mb_name); re-resolving")
+            del cache[key]
+        else:
+            return ArtistResolution(
+                artist_name=c.get("artist_name", artist_name),
+                mbid=c.get("mbid"),
+                origin_country=c.get("origin_country"),
+                formation_year=c.get("formation_year"),
+                artist_type=c.get("artist_type"),
+                primary_genre=c.get("primary_genre"),
+                genres=c.get("genres", []),
+                disambiguation=c.get("disambiguation"),
+                mb_name=c.get("mb_name"),
+            )
 
     # Rate-limit MusicBrainz: 1 req/s
     time.sleep(1.0)
@@ -240,6 +393,8 @@ def _resolve_artist_cached(
         "artist_type": resolved.artist_type,
         "primary_genre": resolved.primary_genre,
         "genres": resolved.genres,
+        "disambiguation": resolved.disambiguation,
+        "mb_name": resolved.mb_name,
     }
     return resolved
 
@@ -346,10 +501,15 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
 
                     # Filter: exclude non-artist attraction types
                     classifications = primary_attraction.get("classifications") or []
-                    attraction_type = ((classifications[0] if classifications else {}).get("type") or {}).get("name", "")
+                    first_class = classifications[0] if classifications else {}
+                    attraction_type = (first_class.get("type") or {}).get("name", "")
                     if attraction_type in ("Event Style", "Venue Based"):
                         skipped += 1
                         continue
+
+                    # Extract TM genre for downstream filtering
+                    tm_genre = (first_class.get("genre") or {}).get("name", "")
+                    tm_subgenre = (first_class.get("subGenre") or {}).get("name", "")
 
                     # Filter: exclude cancelled/postponed events
                     event_status = (event.get("dates", {}).get("status") or {}).get("code", "")
@@ -361,6 +521,22 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
                     city = venue.get("city") or {}
                     country = venue.get("country") or {}
                     start = event.get("dates", {}).get("start") or {}
+
+                    # Clean artist name: strip TM qualifiers like "(Las Vegas)"
+                    raw_artist = primary_attraction.get("name") or ""
+                    artist_name = _strip_tm_qualifier(raw_artist)
+
+                    # Filter: skip if attraction name matches or is contained
+                    # in the venue name (indicates venue listed as the "artist").
+                    # E.g., "Holiday Inn" artist at "Holiday Inn Resort" venue.
+                    venue_name = venue.get("name") or ""
+                    norm_artist = _normalize_for_match(artist_name)
+                    norm_venue = _normalize_for_match(venue_name)
+                    if norm_artist and norm_venue and len(norm_artist) > 3 and (
+                        norm_artist in norm_venue or norm_venue in norm_artist
+                    ):
+                        skipped += 1
+                        continue
 
                     event_id = event.get("id")
                     if not event_id or event_id in seen_event_ids:
@@ -374,15 +550,17 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
                             "event_date": start.get("localDate"),
                             "event_time": start.get("localTime"),
                             "event_datetime_utc": start.get("dateTime"),
-                            "artist_name": primary_attraction.get("name"),
+                            "artist_name": artist_name,
                             "artist_mbid": None,
                             "venue_id": venue.get("id"),
-                            "venue_name": venue.get("name"),
+                            "venue_name": venue_name,
                             "city": city.get("name"),
                             "country_code": country.get("countryCode"),
                             "country_name": country.get("name"),
                             "event_status": event_status,
                             "event_url": event.get("url"),
+                            "tm_genre": tm_genre or None,
+                            "tm_subgenre": tm_subgenre or None,
                             "extracted_at": extracted_at,
                         }
                     )
@@ -394,8 +572,8 @@ def _ticketmaster_events() -> list[dict[str, Any]]:
 
 
 def _ticketmaster_touring_artists(ticketmaster_rows: list[dict[str, Any]]) -> list[str]:
-    """Return top artists ranked by event count (descending)."""
-    max_artists = int(os.getenv("MAX_TOURING_ARTISTS", "100"))
+    """Return top artists ranked by event count (descending) across all markets."""
+    max_artists = int(os.getenv("MAX_TOURING_ARTISTS", "120"))
     counts: dict[str, int] = {}
     for row in ticketmaster_rows:
         name = (row.get("artist_name") or "").strip()
@@ -417,7 +595,7 @@ def _setlistfm_setlists(artist_mbids: dict[str, str]) -> list[dict[str, Any]]:
         raise ValueError("SETLISTFM_API_KEY is required for Setlist.fm ingestion.")
 
     mode = _pipeline_mode()
-    max_pages = int(os.getenv("SETLISTFM_MAX_PAGES", "80" if mode == "production" else "5"))
+    max_pages = int(os.getenv("SETLISTFM_MAX_PAGES", "10" if mode == "production" else "5"))
     user_agent = os.getenv("SETLISTFM_USER_AGENT", "gigwise-analytics/0.1")
     extracted_at = datetime.now(timezone.utc).isoformat()
 
@@ -427,40 +605,55 @@ def _setlistfm_setlists(artist_mbids: dict[str, str]) -> list[dict[str, Any]]:
         "User-Agent": user_agent,
     }
 
-    # Setlist.fm rate limit: ~2 req/s for authenticated users.
-    # A small delay between requests avoids hitting 429s in the first place.
-    setlistfm_delay = float(os.getenv("SETLISTFM_REQUEST_DELAY", "0.6"))
-    setlistfm_retries = int(os.getenv("SETLISTFM_MAX_RETRIES", "8"))
+    # Setlist.fm hard rate limits (https://api.setlist.fm/docs):
+    #   - max 2.0 requests/second
+    #   - max 1440 requests/day
+    # We enforce both. The per-second limit is handled by a minimum delay
+    # (0.5s = 2 req/s). The daily limit is tracked with a counter.
+    setlistfm_delay = max(float(os.getenv("SETLISTFM_REQUEST_DELAY", "1.0")), 0.5)
+    setlistfm_retries = int(os.getenv("SETLISTFM_MAX_RETRIES", "5"))
+    daily_limit = int(os.getenv("SETLISTFM_DAILY_LIMIT", "1400"))  # stay ~40 under the 1440 hard limit
+    current_delay = setlistfm_delay  # adaptive: doubles on 429
+    request_count = 0
 
     rows: list[dict[str, Any]] = []
     skipped_artists: list[str] = []
-    _status(f"Fetching Setlist.fm setlists for {len(artist_mbids)} artists (max_pages={max_pages}, min_year={SETLISTFM_MIN_YEAR}, delay={setlistfm_delay}s)")
+    _status(
+        f"Fetching Setlist.fm setlists for {len(artist_mbids)} artists "
+        f"(max_pages={max_pages}, min_year={SETLISTFM_MIN_YEAR}, "
+        f"delay={setlistfm_delay}s, daily_limit={daily_limit})"
+    )
+    daily_limit_hit = False
 
     for index, (artist_name, mbid) in enumerate(artist_mbids.items(), start=1):
+        if daily_limit_hit:
+            skipped_artists.append(artist_name)
+            continue
         _status(f"Setlist.fm artist {index}/{len(artist_mbids)}: {artist_name} (mbid={'yes' if mbid else 'no'})")
-        normalized_search = _normalize_artist_name(artist_name) if not mbid else None
+        if not mbid:
+            _status(f"  Skipping {artist_name!r}: no MBID (Setlist.fm requires MBID)")
+            skipped_artists.append(artist_name)
+            continue
         hit_cutoff = False
 
         for page in range(1, max_pages + 1):
             if hit_cutoff:
                 break
-            time.sleep(setlistfm_delay)
+            if request_count >= daily_limit:
+                _status(f"  Daily request limit reached ({request_count}/{daily_limit}); stopping Setlist.fm ingestion")
+                daily_limit_hit = True
+                break
+            time.sleep(current_delay)
+            request_count += 1
             try:
-                if mbid:
-                    url = SETLISTFM_ARTIST_URL.format(mbid=mbid)
-                    data = _http_json(url, headers=headers, params={"p": page}, max_retries=setlistfm_retries)
-                else:
-                    data = _http_json(
-                        SETLISTFM_SEARCH_URL,
-                        headers=headers,
-                        params={"artistName": artist_name, "p": page},
-                        max_retries=setlistfm_retries,
-                    )
+                url = SETLISTFM_ARTIST_URL.format(mbid=mbid)
+                data = _http_json(url, headers=headers, params={"p": page}, max_retries=setlistfm_retries)
             except RuntimeError as exc:
                 if "HTTP 404" in str(exc):
                     break
                 if "HTTP 429" in str(exc):
-                    _status(f"  Rate-limited on {artist_name} after retries; skipping remaining pages")
+                    current_delay = min(current_delay * 2, 10.0)
+                    _status(f"  Rate-limited on {artist_name}; delay now {current_delay:.1f}s, skipping remaining pages")
                     skipped_artists.append(artist_name)
                     break
                 raise
@@ -472,12 +665,6 @@ def _setlistfm_setlists(artist_mbids: dict[str, str]) -> list[dict[str, Any]]:
                 break
 
             for setlist in setlists:
-                # For name-search fallback, strict-match to skip cover bands
-                if not mbid:
-                    returned_name = (setlist.get("artist") or {}).get("name") or ""
-                    if _normalize_artist_name(returned_name) != normalized_search:
-                        continue
-
                 # Parse event date and apply year cutoff
                 raw_date = setlist.get("eventDate") or ""
                 event_year = None
@@ -529,36 +716,27 @@ def _setlistfm_setlists(artist_mbids: dict[str, str]) -> list[dict[str, Any]]:
     rows = [row for row in rows if row.get("setlist_id")]
 
     if skipped_artists:
-        _status(f"Setlist.fm: skipped {len(skipped_artists)} artists due to rate limits: {', '.join(skipped_artists[:10])}")
-    _status(f"Prepared Setlist.fm rows: {len(rows)}")
+        _status(f"Setlist.fm: skipped {len(skipped_artists)} artists due to rate limits / daily cap: {', '.join(skipped_artists[:10])}")
+    _status(f"Prepared Setlist.fm rows: {len(rows)} (API requests used: {request_count}/{daily_limit})")
     return rows
 
-
-# ── Artist selection ────────────────────────────────────────────────────
-
-def _selected_artists(ticketmaster_rows: list[dict[str, Any]]) -> list[str]:
-    mode = _pipeline_mode()
-
-    if mode == "production":
-        # Production: derive from Ticketmaster events
-        artists = _ticketmaster_touring_artists(ticketmaster_rows)
-        if not artists:
-            raise ValueError("No touring artists found from Ticketmaster. Check API key and filters.")
-        _status(f"Production mode: {len(artists)} artists from Ticketmaster events")
-        return artists
-
-    # Prototype: use tracked artist list
-    raw = os.getenv("TRACKED_ARTISTS", "Coldplay,Radiohead,Arctic Monkeys").strip('"').strip("'")
-    artists = [name.strip() for name in raw.split(",") if name.strip()]
-    if not artists:
-        raise ValueError("TRACKED_ARTISTS is empty. Set at least one artist name or use PIPELINE_MODE=production.")
-    _status(f"Prototype mode: {len(artists)} tracked artists")
-    return artists
 
 
 # ── Main build ──────────────────────────────────────────────────────────
 
 def _build_rows() -> dict[str, list[dict[str, Any]]]:
+    """Build all output rows using a multi-phase pipeline.
+
+    Production pipeline (6 phases):
+      1. Fetch Ticketmaster events
+      2. Pre-filter: remove obvious non-artists via name heuristics (instant)
+      3. Rank remaining artists by event count, select top N
+      4. MB-resolve ONLY those ~100 candidates (not all 1000+ unique TM artists)
+      5. Post-filter by MB artist_type + disambiguation
+      6. Enrich TM rows & fetch Setlist.fm for verified artists
+
+    This avoids the old bottleneck of resolving every unique TM artist via MB.
+    """
     mode = _pipeline_mode()
     _status(f"Pipeline mode: {mode}")
 
@@ -572,48 +750,60 @@ def _build_rows() -> dict[str, list[dict[str, Any]]]:
     mb_cache = _load_mb_cache()
     cache_hits_before = len(mb_cache)
 
-    ticketmaster_rows = _ticketmaster_events()
-
     now = datetime.now(timezone.utc)
     run_date = now.date().isoformat()
     extracted_at = f"{run_date}T00:00:00+00:00"
 
-    mb_rows: list[dict[str, Any]] = []
-    mbid_by_artist_name: dict[str, str] = {}
-    artist_type_by_name: dict[str, str | None] = {}
+    # ── Phase 1: Fetch Ticketmaster events ──────────────────────────────
+    ticketmaster_rows = _ticketmaster_events()
 
-    # ── Phase 1: Resolve ALL unique TM artists via MusicBrainz ──────────
-    # In production, we need to know which artists are genuine music acts
-    # *before* selecting the top artists for Setlist.fm ingestion.
-    # In prototype mode, resolve a limited set for speed.
-    default_limit = "0" if mode == "production" else "50"
-    resolve_limit = int(os.getenv("TICKETMASTER_RESOLVE_ARTISTS_LIMIT", default_limit))
-    unique_ticketmaster_artists = sorted(
-        {
-            (row.get("artist_name") or "").strip()
-            for row in ticketmaster_rows
-            if (row.get("artist_name") or "").strip()
-        }
-    )
-    artists_to_resolve = unique_ticketmaster_artists if resolve_limit == 0 else unique_ticketmaster_artists[:resolve_limit]
-    if artists_to_resolve:
-        _status(
-            f"Resolving Ticketmaster artists (MusicBrainz) "
-            f"(limit={'all' if resolve_limit == 0 else resolve_limit}, unique={len(unique_ticketmaster_artists)})"
-        )
-        for idx, artist_name in enumerate(artists_to_resolve, start=1):
-            if idx % 50 == 0:
-                _status(f"  Resolved {idx}/{len(artists_to_resolve)} artists...")
-            artist_key = _normalize_artist_name(artist_name)
-            if artist_key in mbid_by_artist_name:
-                continue
-            try:
-                resolved = _resolve_artist_cached(artist_name, mb_user_agent, mb_api_key, mb_cache)
-            except Exception:
-                continue
-            if resolved.mbid:
-                mbid_by_artist_name[artist_key] = resolved.mbid
-                artist_type_by_name[artist_key] = resolved.artist_type
+    # ── Phase 2: Select candidate artists ───────────────────────────────
+    if mode == "production":
+        # Pre-filter: remove obvious non-artists using cheap name heuristics
+        pre_filtered_rows = [
+            row for row in ticketmaster_rows
+            if not _is_likely_non_artist(row.get("artist_name") or "")
+        ]
+        excluded_count = len(ticketmaster_rows) - len(pre_filtered_rows)
+        if excluded_count:
+            _status(f"Pre-filter: excluded {excluded_count} events matching non-artist name patterns")
+
+        # Rank remaining artists by event count, pick top N
+        artists = _ticketmaster_touring_artists(pre_filtered_rows)
+        if not artists:
+            raise ValueError("No touring artists found from Ticketmaster. Check API key and filters.")
+        _status(f"Production mode: {len(artists)} candidate artists from Ticketmaster events")
+    else:
+        pre_filtered_rows = ticketmaster_rows
+        raw = os.getenv("TRACKED_ARTISTS", "Coldplay,Radiohead,Arctic Monkeys").strip('"').strip("'")
+        artists = [name.strip() for name in raw.split(",") if name.strip()]
+        if not artists:
+            raise ValueError("TRACKED_ARTISTS is empty. Set at least one artist name or use PIPELINE_MODE=production.")
+        _status(f"Prototype mode: {len(artists)} tracked artists")
+
+    # ── Phase 3: MB-resolve selected artists only ───────────────────────
+    # Only resolves ~100 selected candidates (not all 1000+ unique TM artists).
+    # Cached artists resolve instantly; uncached require 1 API call per second.
+    mb_rows: list[dict[str, Any]] = []
+    mbid_by_artist: dict[str, str] = {}
+    artist_type_by_name: dict[str, str | None] = {}
+    disambig_by_name: dict[str, str] = {}
+
+    _status(f"Resolving {len(artists)} artists via MusicBrainz (cache has {len(mb_cache)} entries)")
+    for idx, artist_name in enumerate(artists, start=1):
+        if idx % 25 == 0:
+            _status(f"  Resolved {idx}/{len(artists)} artists...")
+        key = _normalize_artist_name(artist_name)
+        if key in mbid_by_artist:
+            continue
+        try:
+            resolved = _resolve_artist_cached(artist_name, mb_user_agent, mb_api_key, mb_cache)
+        except Exception:
+            continue
+        if resolved.mbid:
+            mbid_by_artist[key] = resolved.mbid
+            artist_type_by_name[key] = resolved.artist_type
+            disambig_by_name[key] = resolved.disambiguation or ""
             mb_rows.append(
                 {
                     "artist_name": resolved.artist_name,
@@ -626,71 +816,70 @@ def _build_rows() -> dict[str, list[dict[str, Any]]]:
                 }
             )
 
-    # ── Phase 2: Filter TM rows — genuine music artists only ───────────
-    enriched_ticketmaster_rows: list[dict[str, Any]] = []
-    no_mb_match = 0
+    # ── Phase 4: Post-filter by MB artist type + disambiguation ─────────
+    verified_keys: set[str] = set()
+    no_mbid = 0
     non_artist_type = 0
-    for row in ticketmaster_rows:
-        artist_key = _normalize_artist_name(str(row.get("artist_name") or ""))
-        mbid = mbid_by_artist_name.get(artist_key)
+    tribute_disambig = 0
+    for artist_name in artists:
+        key = _normalize_artist_name(artist_name)
+        mbid = mbid_by_artist.get(key)
         if not mbid:
-            no_mb_match += 1
+            no_mbid += 1
+            _status(f"  Rejected {artist_name!r}: no MB match")
             continue
-        atype = artist_type_by_name.get(artist_key)
+        atype = artist_type_by_name.get(key)
         if atype and atype not in _VALID_ARTIST_TYPES:
             non_artist_type += 1
+            _status(f"  Rejected {artist_name!r}: type={atype}")
             continue
-        enriched_row = dict(row)
-        enriched_row["artist_mbid"] = mbid
-        enriched_ticketmaster_rows.append(enriched_row)
+        # Check disambiguation for tribute/cover indicators
+        disambig = disambig_by_name.get(key, "").lower()
+        if any(kw in disambig for kw in _TRIBUTE_DISAMBIG_KW):
+            tribute_disambig += 1
+            _status(f"  Rejected {artist_name!r}: disambiguation={disambig!r}")
+            continue
+        verified_keys.add(key)
 
     _status(
-        f"Ticketmaster: {len(enriched_ticketmaster_rows)} events with verified artist match, "
-        f"{no_mb_match} dropped (no MB match), {non_artist_type} dropped (non-artist type)"
+        f"Artist verification: {len(verified_keys)} verified, "
+        f"{no_mbid} no MBID, {non_artist_type} non-artist type, "
+        f"{tribute_disambig} tribute/cover (disambiguation)"
     )
 
-    # ── Phase 3: Select artists for Setlist.fm ingestion ────────────────
-    # Production: top N by event count from *filtered* TM rows (verified artists only).
-    # Prototype: use tracked artist list from env.
-    artists = _selected_artists(enriched_ticketmaster_rows)
-    _status(f"Selected {len(artists)} artists for Setlist.fm + MusicBrainz ingestion")
-
-    # Resolve selected artists (adds any not already in mb_rows)
-    artist_mbid_map: dict[str, str] = {}
-    for idx, artist_name in enumerate(artists, start=1):
-        artist_key = _normalize_artist_name(artist_name)
-        # Already resolved during TM resolution?
-        if artist_key in mbid_by_artist_name:
-            artist_mbid_map[artist_name] = mbid_by_artist_name[artist_key]
+    # ── Phase 5: Enrich TM rows with MBIDs (verified artists only) ─────
+    enriched_ticketmaster_rows: list[dict[str, Any]] = []
+    for row in pre_filtered_rows:
+        key = _normalize_artist_name(row.get("artist_name") or "")
+        if key not in verified_keys:
             continue
-        _status(f"Resolving selected artist {idx}/{len(artists)}: {artist_name}")
-        try:
-            resolved = _resolve_artist_cached(artist_name, mb_user_agent, mb_api_key, mb_cache)
-        except Exception as exc:
-            raise RuntimeError(f"Failed resolving artist '{artist_name}': {exc}") from exc
-        mb_rows.append(
-            {
-                "artist_name": resolved.artist_name,
-                "mbid": resolved.mbid,
-                "origin_country": resolved.origin_country,
-                "formation_year": resolved.formation_year,
-                "artist_type": resolved.artist_type,
-                "primary_genre": resolved.primary_genre,
-                "extracted_at": extracted_at,
-            }
-        )
-        if resolved.mbid:
-            mbid_by_artist_name[artist_key] = resolved.mbid
-            artist_type_by_name[artist_key] = resolved.artist_type
-        artist_mbid_map[artist_name] = resolved.mbid or ""
+        enriched_row = dict(row)
+        enriched_row["artist_mbid"] = mbid_by_artist.get(key)
+        enriched_ticketmaster_rows.append(enriched_row)
 
-    # ── Phase 4: Setlist.fm ingestion ───────────────────────────────────
+    _status(f"Ticketmaster: {len(enriched_ticketmaster_rows)} events with verified artists")
+
+    # ── Phase 6: Setlist.fm ingestion (MBID-only, no name fallback) ─────
+    artist_mbid_map: dict[str, str] = {}
+    for name in artists:
+        key = _normalize_artist_name(name)
+        mbid = mbid_by_artist.get(key, "")
+        if key in verified_keys and mbid:
+            artist_mbid_map[name] = mbid
+
+    # Skip artists whose setlists are already in BigQuery
+    existing_mbids = _existing_setlist_mbids()
+    if existing_mbids:
+        before = len(artist_mbid_map)
+        artist_mbid_map = {n: m for n, m in artist_mbid_map.items() if m not in existing_mbids}
+        skipped = before - len(artist_mbid_map)
+        _status(f"Setlist.fm: skipping {skipped}/{before} artists already in dataset")
+
     setlist_rows = _setlistfm_setlists(artist_mbid_map)
 
     # Persist updated cache
     _save_mb_cache(mb_cache)
-    cache_hits_after = len(mb_cache)
-    _status(f"MusicBrainz cache: {cache_hits_before} entries before, {cache_hits_after} after")
+    _status(f"MusicBrainz cache: {cache_hits_before} entries before, {len(mb_cache)} after")
 
     _status(
         "Prepared rows: "
@@ -703,6 +892,29 @@ def _build_rows() -> dict[str, list[dict[str, Any]]]:
         "setlistfm_setlists": setlist_rows,
         "musicbrainz_artists": mb_rows,
     }
+
+
+def _existing_setlist_mbids() -> set[str]:
+    """Return MBIDs already present in the raw.setlistfm_setlists table."""
+    destination = os.getenv("DLT_DESTINATION", "bigquery").lower()
+    if destination != "bigquery":
+        return set()
+    project_id = os.getenv("GCP_PROJECT_ID", "").strip()
+    dataset_name = os.getenv("DLT_DATASET", "raw")
+    if not project_id:
+        return set()
+    try:
+        from google.cloud import bigquery as bq
+        client = bq.Client(project=project_id)
+        table_ref = f"{project_id}.{dataset_name}.setlistfm_setlists"
+        query = f"SELECT DISTINCT artist_mbid FROM `{table_ref}` WHERE artist_mbid IS NOT NULL"
+        rows = client.query(query).result()
+        mbids = {row.artist_mbid for row in rows}
+        _status(f"Found {len(mbids)} artists already in setlistfm_setlists")
+        return mbids
+    except Exception as exc:
+        _status(f"Could not query existing setlist artists (table may not exist yet): {exc}")
+        return set()
 
 
 def _bigquery_location(project_id: str, dataset_name: str) -> str:

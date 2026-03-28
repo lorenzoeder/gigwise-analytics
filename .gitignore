@@ -24,6 +24,7 @@ terraform.tfvars*
 
 # dbt
 dbt/.user.yml
+dbt_packages/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -237,4 +238,5 @@ __marimo__/
 .bruin.yml
 logs/runs
 logs/*.log
+logs/*.pid
 *.py[cod]

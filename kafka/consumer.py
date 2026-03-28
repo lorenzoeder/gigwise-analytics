@@ -80,7 +80,7 @@ def main() -> None:
     consumer = KafkaConsumer(
         topic,
         bootstrap_servers=bootstrap,
-        auto_offset_reset="latest",
+        auto_offset_reset="earliest",
         enable_auto_commit=True,
         group_id="gigwise-bq-consumer",
         value_deserializer=lambda m: json.loads(m.decode("utf-8")),

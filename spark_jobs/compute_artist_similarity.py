@@ -1,8 +1,8 @@
-"""Spark job: compute pairwise artist repertoire similarity.
+"""Spark job: compute pairwise artist venue similarity.
 
 Reads fact_concert from BigQuery via the Spark BigQuery connector,
-explodes semicolon-delimited song lists, and computes the Jaccard similarity
-index between every pair of artists that share at least one song.
+collects distinct venues per artist, and computes the Jaccard similarity
+index between every pair of artists that share at least one venue.
 
 Writes results directly back to BigQuery (spark_artist_similarity table).
 
@@ -66,68 +66,66 @@ def main() -> None:
     print(f"Reading from BigQuery: {source_table}", flush=True)
     concerts = spark.read.format("bigquery").option("table", source_table).load()
 
-    # Only setlistfm rows have song data
-    setlist_concerts = concerts.filter(
-        (F.col("source") == "setlistfm") & F.col("songs_played").isNotNull()
+    # Use all concerts that have a venue name (both TM and Setlist.fm)
+    concerts_with_venue = concerts.filter(
+        F.col("venue_name").isNotNull() & (F.trim(F.col("venue_name")) != "")
     )
 
     dest_table = f"{project_id}.{dataset}.spark_artist_similarity"
 
-    if setlist_concerts.count() == 0:
-        print("[WARN] No setlist data with songs — writing empty result")
+    if concerts_with_venue.count() == 0:
+        print("[WARN] No concert data with venues — writing empty result")
         empty = spark.createDataFrame(
             [],
-            "artist_a STRING, artist_b STRING, shared_songs LONG, jaccard_similarity DOUBLE, shared_songs_detail STRING",
+            "artist_a STRING, artist_b STRING, shared_venues LONG, jaccard_similarity DOUBLE, shared_venues_detail STRING",
         )
         empty.write.format("bigquery").option("table", dest_table).option("writeMethod", "direct").mode("overwrite").save()
         spark.stop()
         return
 
-    # Explode songs: one row per (artist_name, song)
-    songs = (
-        setlist_concerts
-        .select("artist_name", F.explode(F.split("songs_played", "; ")).alias("song"))
-        .withColumn("song", F.trim(F.col("song")))
-        .filter(F.col("song") != "")
-        .dropDuplicates(["artist_name", "song"])
+    # Distinct (artist_name, venue_name) pairs
+    venues = (
+        concerts_with_venue
+        .select("artist_name", F.trim(F.col("venue_name")).alias("venue_name"))
+        .dropDuplicates(["artist_name", "venue_name"])
     )
 
-    # Count unique songs per artist (for Jaccard denominator)
-    artist_song_counts = songs.groupBy("artist_name").agg(
-        F.countDistinct("song").alias("song_count")
+    # Count unique venues per artist (for Jaccard denominator)
+    artist_venue_counts = venues.groupBy("artist_name").agg(
+        F.countDistinct("venue_name").alias("venue_count")
     )
 
-    # Self-join on shared songs
-    a = songs.alias("a")
-    b = songs.alias("b")
+    # Self-join on shared venues
+    a = venues.alias("a")
+    b = venues.alias("b")
     pairs = (
-        a.join(b, (F.col("a.song") == F.col("b.song")) & (F.col("a.artist_name") < F.col("b.artist_name")))
+        a.join(b, (F.col("a.venue_name") == F.col("b.venue_name")) & (F.col("a.artist_name") < F.col("b.artist_name")))
         .select(
             F.col("a.artist_name").alias("artist_a"),
             F.col("b.artist_name").alias("artist_b"),
-            F.col("a.song").alias("song"),
+            F.col("a.venue_name").alias("venue_name"),
         )
         .dropDuplicates()
     )
 
     shared = pairs.groupBy("artist_a", "artist_b").agg(
-        F.count("song").alias("shared_songs"),
-        F.concat_ws("; ", F.sort_array(F.collect_list("song"))).alias("shared_songs_detail"),
+        F.count("venue_name").alias("shared_venues"),
+        F.concat_ws("; ", F.sort_array(F.collect_list("venue_name"))).alias("shared_venues_detail"),
     )
 
     # Jaccard = |A ∩ B| / |A ∪ B| = shared / (count_a + count_b - shared)
     result = (
         shared
-        .join(artist_song_counts.alias("ca"), F.col("artist_a") == F.col("ca.artist_name"))
-        .join(artist_song_counts.alias("cb"), F.col("artist_b") == F.col("cb.artist_name"))
+        .join(artist_venue_counts.alias("ca"), F.col("artist_a") == F.col("ca.artist_name"))
+        .join(artist_venue_counts.alias("cb"), F.col("artist_b") == F.col("cb.artist_name"))
         .withColumn(
             "jaccard_similarity",
             F.round(
-                F.col("shared_songs") / (F.col("ca.song_count") + F.col("cb.song_count") - F.col("shared_songs")),
+                F.col("shared_venues") / (F.col("ca.venue_count") + F.col("cb.venue_count") - F.col("shared_venues")),
                 4,
             ),
         )
-        .select("artist_a", "artist_b", "shared_songs", "jaccard_similarity", "shared_songs_detail")
+        .select("artist_a", "artist_b", "shared_venues", "jaccard_similarity", "shared_venues_detail")
         .orderBy(F.col("jaccard_similarity").desc())
     )
 

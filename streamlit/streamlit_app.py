@@ -42,8 +42,60 @@ if not date_range.empty and date_range.iloc[0]["min_date"] is not None:
     d_max = date_range.iloc[0]["max_date"].strftime("%d/%m/%Y")
     date_subtitle = f"Upcoming concerts: {d_min} \u2013 {d_max}"
 
+# ── Data queries ─────────────────────────────────────────────────────
+
+df_repertoire = run_query(f"""
+    SELECT artist_name, primary_genre, concert_year, concert_count,
+           unique_songs, total_song_performances
+    FROM `{project_id}.{dataset}.mart_artist_yearly_repertoire`
+    WHERE artist_name IS NOT NULL
+    ORDER BY artist_name, concert_year
+    LIMIT 5000
+""")
+
+df_freshness = run_query(f"""
+    SELECT artist_name, primary_genre, concert_year, concert_count,
+           unique_songs, first_time_songs, repeated_songs, freshness_pct
+    FROM `{project_id}.{dataset}.mart_artist_setlist_freshness`
+    WHERE artist_name IS NOT NULL
+    ORDER BY artist_name, concert_year
+    LIMIT 5000
+""")
+
+MIN_SHOWS = 5
+
+# ── Optional data: Spark artist similarity (production only) ─────────
+df_similarity = safe_query(f"""
+    SELECT artist_a, artist_b, shared_venues, jaccard_similarity
+    FROM `{project_id}.{dataset}.spark_artist_similarity`
+    ORDER BY jaccard_similarity DESC
+    LIMIT 5000
+""")
+
+# ── Optional data: Kafka live event stream ───────────────────────────
+streaming_dataset = os.getenv("BQ_DATASET_STREAMING", "streaming")
+df_live = safe_query(f"""
+    SELECT event_id, event_name, artist_name, event_date, event_status,
+           venue_name, city, country_code, observed_at, is_new
+    FROM `{project_id}.{streaming_dataset}.live_event_updates`
+    ORDER BY observed_at DESC
+    LIMIT 500
+""")
+
 # ── Tile 1: Artist Touring Intensity ─────────────────────────────────
 # Two charts stacked vertically: top = artist bar, bottom = genre bar
+
+def _is_stream_live() -> bool:
+    """Check if the Kafka producer process is currently running."""
+    pid_file = Path(__file__).resolve().parent.parent / "logs" / "producer.pid"
+    if not pid_file.exists():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)  # signal 0: check if process exists
+        return True
+    except (ValueError, ProcessLookupError, PermissionError, OSError):
+        return False
 
 tile1, tile2 = st.columns(2)
 
@@ -127,45 +179,90 @@ with tile1:
     else:
         st.info("No data yet in mart_artist_touring_intensity.")
 
+    # ── Live Event Stream (inside Tile 1) ────────────────────────
+    if df_live is not None and not df_live.empty:
+        st.divider()
+
+        stream_live = _is_stream_live()
+        hdr_left, hdr_right = st.columns([3, 1])
+        with hdr_left:
+            st.subheader("Live Event Stream")
+        with hdr_right:
+            if stream_live:
+                st.markdown(
+                    '<div style="text-align:right; padding-top:0.6rem;">'
+                    '<span style="background:#22c55e; color:white; padding:0.3rem 0.8rem; '
+                    'border-radius:1rem; font-weight:600; font-size:0.85rem;">'
+                    '\U0001f7e2 LIVE</span></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div style="text-align:right; padding-top:0.6rem;">'
+                    '<span style="background:#6b7280; color:white; padding:0.3rem 0.8rem; '
+                    'border-radius:1rem; font-weight:600; font-size:0.85rem;">'
+                    '\u26aa OFFLINE</span></div>',
+                    unsafe_allow_html=True,
+                )
+        refresh_note = "Polling every ~5 min. " if stream_live else "Currently offline. "
+        st.caption(
+            f"{refresh_note}Upcoming music events from Ticketmaster, "
+            "streamed via Kafka and landed in BigQuery."
+        )
+
+        m1, m2, m3 = st.columns(3)
+        total_events = df_live["event_id"].nunique()
+        new_events = df_live[df_live["is_new"] == True]["event_id"].nunique()
+        latest_ts = df_live["observed_at"].max()
+
+        m1.metric("Events Tracked", f"{total_events:,}")
+        m2.metric("New Listings", f"{new_events:,}")
+        m3.metric(
+            "Latest Update",
+            latest_ts.strftime("%H:%M %d/%m/%Y") if pd.notna(latest_ts) else "\u2014",
+        )
+
+        live_left, live_right = st.columns(2)
+
+        with live_left:
+            st.caption("Event Status Breakdown")
+            status_df = (
+                df_live.groupby("event_status", as_index=False)
+                .agg(count=("event_id", "nunique"))
+                .sort_values("count", ascending=False)
+            )
+            status_chart = (
+                alt.Chart(status_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("count:Q", title="Unique Events"),
+                    y=alt.Y("event_status:N", sort="-x", title="Status"),
+                    color=alt.Color("event_status:N", legend=None),
+                )
+                .properties(height=max(len(status_df) * 35, 120))
+            )
+            st.altair_chart(status_chart, use_container_width=True)
+
+        with live_right:
+            st.caption("Recent Event Updates")
+            recent = df_live.head(20)[
+                ["artist_name", "event_name", "event_status", "city", "country_code", "observed_at"]
+            ].copy()
+            recent["observed_at"] = pd.to_datetime(recent["observed_at"]).dt.strftime("%H:%M %d/%m")
+            st.dataframe(
+                recent.rename(columns={
+                    "artist_name": "Artist",
+                    "event_name": "Event",
+                    "event_status": "Status",
+                    "city": "City",
+                    "country_code": "Country",
+                    "observed_at": "Observed",
+                }),
+                hide_index=True,
+                use_container_width=True,
+            )
+
 # ── Tile 2: Setlist Repertoire + Freshness ──────────────────────────
-
-df_repertoire = run_query(f"""
-    SELECT artist_name, primary_genre, concert_year, concert_count,
-           unique_songs, total_song_performances
-    FROM `{project_id}.{dataset}.mart_artist_yearly_repertoire`
-    WHERE artist_name IS NOT NULL
-    ORDER BY artist_name, concert_year
-    LIMIT 5000
-""")
-
-df_freshness = run_query(f"""
-    SELECT artist_name, primary_genre, concert_year, concert_count,
-           unique_songs, first_time_songs, repeated_songs, freshness_pct
-    FROM `{project_id}.{dataset}.mart_artist_setlist_freshness`
-    WHERE artist_name IS NOT NULL
-    ORDER BY artist_name, concert_year
-    LIMIT 5000
-""")
-
-MIN_SHOWS = 5
-
-# ── Optional data: Spark artist similarity (production only) ─────────
-df_similarity = safe_query(f"""
-    SELECT artist_a, artist_b, shared_songs, jaccard_similarity
-    FROM `{project_id}.{dataset}.spark_artist_similarity`
-    ORDER BY jaccard_similarity DESC
-    LIMIT 5000
-""")
-
-# ── Optional data: Kafka live event stream ───────────────────────────
-streaming_dataset = os.getenv("BQ_DATASET_STREAMING", "streaming")
-df_live = safe_query(f"""
-    SELECT event_id, event_name, artist_name, event_date, event_status,
-           venue_name, city, country_code, observed_at, is_new
-    FROM `{project_id}.{streaming_dataset}.live_event_updates`
-    ORDER BY observed_at DESC
-    LIMIT 500
-""")
 
 with tile2:
     st.subheader("Setlist Evolution & Similarity")
@@ -183,7 +280,7 @@ with tile2:
 
     # ── Combined Repertoire + Freshness chart ──
     st.caption(
-        "How many unique songs does each artist play per year of touring? (data from 2000 onward)  \n"
+        "How many unique songs does each artist play per year of touring? (only recent setlist data)  \n"
         "The line shows the Freshness Index: % of songs appearing for the first time in the dataset.  \n"
         "(high = fresh repertoire, low = predictable setlist)"
     )
@@ -264,7 +361,7 @@ with tile2:
     elif not selected_artist:
         st.info("No setlist data yet in mart_artist_yearly_repertoire.")
 
-    # ── Spark: Artist Repertoire Similarity ──────────────────────
+    # ── Spark: Artist Venue Similarity ────────────────────────────
     if df_similarity is not None and not df_similarity.empty and selected_artist:
         artist_sim = df_similarity[
             (df_similarity["artist_a"] == selected_artist)
@@ -278,11 +375,11 @@ with tile2:
             )
             artist_sim = artist_sim.sort_values("jaccard_similarity", ascending=False).head(10)
 
-            st.subheader(f"Artists Playing Same Songs As {selected_artist}")
+            st.subheader(f"Artists Playing at the Same Venues as {selected_artist}")
             st.caption(
-                "Artists with the most overlap in live concert setlists, "
+                "Artists who have played at the same venues, "
                 "ranked by Jaccard similarity.  \n"
-                "(shared songs \u00f7 combined unique songs)"
+                "(shared venues \u00f7 combined unique venues)"
             )
 
             sim_chart = (
@@ -298,7 +395,7 @@ with tile2:
                     ),
                     tooltip=[
                         alt.Tooltip("similar_artist:N", title="Artist"),
-                        alt.Tooltip("shared_songs:Q", title="Shared Songs"),
+                        alt.Tooltip("shared_venues:Q", title="Shared Venues"),
                         alt.Tooltip("jaccard_similarity:Q", title="Jaccard Score", format=".4f"),
                     ],
                 )
@@ -307,107 +404,11 @@ with tile2:
             st.altair_chart(sim_chart, use_container_width=True)
 
             st.dataframe(
-                artist_sim[["similar_artist", "shared_songs", "jaccard_similarity"]]
+                artist_sim[["similar_artist", "shared_venues", "jaccard_similarity"]]
                 .rename(columns={
                     "similar_artist": "Artist",
-                    "shared_songs": "Shared Songs",
+                    "shared_venues": "Shared Venues",
                     "jaccard_similarity": "Jaccard Score",
                 }),
                 hide_index=True,
             )
-
-# ── Live Event Stream (Kafka Streaming) ─────────────────────────────
-
-def _is_stream_live() -> bool:
-    """Check if the Kafka producer process is currently running."""
-    pid_file = Path(__file__).resolve().parent.parent / "logs" / "producer.pid"
-    if not pid_file.exists():
-        return False
-    try:
-        pid = int(pid_file.read_text().strip())
-        os.kill(pid, 0)  # signal 0: check if process exists
-        return True
-    except (ValueError, ProcessLookupError, PermissionError, OSError):
-        return False
-
-if df_live is not None and not df_live.empty:
-    st.divider()
-
-    stream_live = _is_stream_live()
-    hdr_left, hdr_right = st.columns([3, 1])
-    with hdr_left:
-        st.subheader("Live Event Stream")
-    with hdr_right:
-        if stream_live:
-            st.markdown(
-                '<div style="text-align:right; padding-top:0.6rem;">'
-                '<span style="background:#22c55e; color:white; padding:0.3rem 0.8rem; '
-                'border-radius:1rem; font-weight:600; font-size:0.85rem;">'
-                '\U0001f7e2 LIVE</span></div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                '<div style="text-align:right; padding-top:0.6rem;">'
-                '<span style="background:#6b7280; color:white; padding:0.3rem 0.8rem; '
-                'border-radius:1rem; font-weight:600; font-size:0.85rem;">'
-                '\u26aa OFFLINE</span></div>',
-                unsafe_allow_html=True,
-            )
-    refresh_note = "Polling every ~5 min. " if stream_live else "Currently offline. "
-    st.caption(
-        f"{refresh_note}Upcoming music events from Ticketmaster, "
-        "streamed via Kafka and landed in BigQuery."
-    )
-
-    m1, m2, m3 = st.columns(3)
-    total_events = df_live["event_id"].nunique()
-    new_events = df_live[df_live["is_new"] == True]["event_id"].nunique()
-    latest_ts = df_live["observed_at"].max()
-
-    m1.metric("Events Tracked", f"{total_events:,}")
-    m2.metric("New Listings", f"{new_events:,}")
-    m3.metric(
-        "Latest Update",
-        latest_ts.strftime("%H:%M %d/%m/%Y") if pd.notna(latest_ts) else "\u2014",
-    )
-
-    live_left, live_right = st.columns(2)
-
-    with live_left:
-        st.caption("Event Status Breakdown")
-        status_df = (
-            df_live.groupby("event_status", as_index=False)
-            .agg(count=("event_id", "nunique"))
-            .sort_values("count", ascending=False)
-        )
-        status_chart = (
-            alt.Chart(status_df)
-            .mark_bar()
-            .encode(
-                x=alt.X("count:Q", title="Unique Events"),
-                y=alt.Y("event_status:N", sort="-x", title="Status"),
-                color=alt.Color("event_status:N", legend=None),
-            )
-            .properties(height=max(len(status_df) * 35, 120))
-        )
-        st.altair_chart(status_chart, use_container_width=True)
-
-    with live_right:
-        st.caption("Recent Event Updates")
-        recent = df_live.head(20)[
-            ["artist_name", "event_name", "event_status", "city", "country_code", "observed_at"]
-        ].copy()
-        recent["observed_at"] = pd.to_datetime(recent["observed_at"]).dt.strftime("%H:%M %d/%m")
-        st.dataframe(
-            recent.rename(columns={
-                "artist_name": "Artist",
-                "event_name": "Event",
-                "event_status": "Status",
-                "city": "City",
-                "country_code": "Country",
-                "observed_at": "Observed",
-            }),
-            hide_index=True,
-            use_container_width=True,
-        )

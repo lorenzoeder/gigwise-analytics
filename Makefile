@@ -92,7 +92,9 @@ wipe-all:
 	echo "--- Truncating streaming table ---" && \
 	(bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_STREAMING.live_event_updates\`" 2>/dev/null || true) && \
 	echo "--- Truncating Spark output ---" && \
-	(bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_ANALYTICS.spark_artist_similarity\`" 2>/dev/null || true)
+	(bq query --nouse_legacy_sql "TRUNCATE TABLE \`$$GCP_PROJECT_ID.$$BQ_DATASET_ANALYTICS.spark_artist_similarity\`" 2>/dev/null || true) && \
+	echo "--- Deleting MusicBrainz cache from GCS ---" && \
+	(gsutil rm "gs://$$DATA_LAKE_BUCKET/cache/mb_artist_cache.json" 2>/dev/null || true)
 	@echo ""
 	@echo "All data wiped. Rebuild with: make run-bruin && make run-spark"
 
@@ -155,8 +157,9 @@ run-streaming:
 		sleep 2; \
 	done && \
 	echo "Kafka broker is ready" && \
-	nohup uv run python kafka/producer.py >> logs/producer.log 2>&1 & \
 	nohup uv run python kafka/consumer.py >> logs/consumer.log 2>&1 & \
+	sleep 3 && \
+	nohup uv run python kafka/producer.py >> logs/producer.log 2>&1 & \
 	sleep 2 && \
 	echo "Streaming started in background" && \
 	echo "  Producer log: logs/producer.log" && \

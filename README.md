@@ -134,7 +134,7 @@ gigwise-analytics/
 
 Primary path: batch. Spark and Kafka are integrated as production add-ons.
 
-- **Batch (primary):** dlt → BigQuery → dbt → Streamlit. PySpark computes artist repertoire similarity as an additional production-only enrichment step after dbt, writing results back to BigQuery.
+- **Batch (primary):** dlt → BigQuery → dbt → Streamlit. PySpark computes artist venue similarity as an additional production-only enrichment step after dbt, writing results back to BigQuery.
 - **Streaming (add-on):** Kafka producer polls Ticketmaster Discovery API for real-time event updates and publishes to Redpanda. Kafka consumer streams those events to BigQuery `streaming.live_event_updates` table. Fully toggleable via `make run-streaming` / `make stop-streaming`.
 
 Reasoning for batch as primary path:
@@ -154,7 +154,7 @@ Marts for dashboard tiles:
 - `mart_artist_touring_intensity`: touring intensity by artist, genre, and country (Tile 1)
 - `mart_artist_yearly_repertoire`: unique songs played per artist per year (Tile 2)
 - `mart_artist_setlist_freshness`: percentage of first-time songs per artist per year (Freshness Index)
-- `spark_artist_similarity`: pairwise artist similarity by shared songs (Spark, production only)
+- `spark_artist_similarity`: pairwise artist similarity by shared venues (Spark, production only)
 
 ## 9. Dashboard
 
@@ -166,7 +166,7 @@ The Streamlit app contains two core tiles, plus optional Spark and Kafka section
 
 3. **Setlist Freshness Index**: per-artist analysis showing what percentage of each year's setlist consists of songs appearing for the first time in the dataset. High freshness = fresh repertoire; low freshness = predictable setlist. First year is excluded (always 100%).
 
-4. **Similar Artists (Shared Repertoire)** *(optional, production only)*: when `spark_artist_similarity` exists, shows a horizontal bar chart of the top 10 most similar artists to the selected artist, ranked by Jaccard similarity score based on shared concert songs.
+4. **Similar Artists (Shared Venues)** *(optional, production only)*: when `spark_artist_similarity` exists, shows a horizontal bar chart of the top 10 most similar artists to the selected artist, ranked by Jaccard similarity score based on shared concert venues.
 
 5. **Live Event Stream** *(optional, when streaming is running)*: when `streaming.live_event_updates` exists, shows a full-width section with real-time event metrics, status breakdown chart, and recent event updates table.
 
