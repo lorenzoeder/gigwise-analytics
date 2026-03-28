@@ -3,7 +3,7 @@ MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 ROOT_DIR := $(dir $(MAKEFILE_PATH))
 DBT_BUILD_FLAGS ?= --fail-fast
 
-.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra wipe-ingestion wipe-all run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug run-dashboard run-dashboard-logs stop-dashboard run-spark run-streaming stop-streaming test lint fmt
+.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra wipe-ingestion wipe-all run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug export-dashboard-data run-dashboard run-dashboard-logs stop-dashboard run-spark run-streaming stop-streaming test lint fmt
 
 help:
 	@echo "Available targets:"
@@ -118,6 +118,10 @@ run-dbt-debug:
 run-dbt:
 	$(MAKE) -f $(MAKEFILE_PATH) run-dbt-debug
 	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt && uv run dbt deps && uv run dbt build --target prod $(DBT_BUILD_FLAGS)
+
+export-dashboard-data:
+	cd $(ROOT_DIR) && set -a && source .env && set +a && \
+	uv run python streamlit/export_data.py
 
 run-dashboard:
 	cd $(ROOT_DIR) && mkdir -p logs && set -a && source .env && set +a && \

@@ -10,6 +10,11 @@ docs/personal_ops_guide.md
 *.duckdb
 data/
 
+# Dashboard snapshots (tracked for Streamlit Cloud deploy)
+!streamlit/data/
+!streamlit/data/*.parquet
+!streamlit/data/meta.json
+
 # GCP
 google-cloud-sdk/
 *key.json

@@ -1,39 +1,86 @@
+import json
 import os
+from datetime import date
 from pathlib import Path
 
 import altair as alt
 import pandas as pd
 import streamlit as st
-from google.cloud import bigquery
 
 st.set_page_config(page_title="GigWise Analytics", layout="wide")
 st.title("GigWise Analytics Dashboard")
 st.caption("Concert touring intensity and setlist evolution")
 
-project_id = os.getenv("GCP_PROJECT_ID")
-dataset = os.getenv("BQ_DATASET_ANALYTICS", "analytics")
+# ── Data loading: snapshot vs live ───────────────────────────────────
+# DASHBOARD_MODE=cloud  → parquet snapshots only, no BigQuery
+# DASHBOARD_MODE=local  → parquet if fresh (today), else live BigQuery
+DASHBOARD_MODE = os.getenv("DASHBOARD_MODE", "local").lower()
+DATA_DIR = Path(__file__).resolve().parent / "data"
 
-if not project_id:
-    st.error("Set GCP_PROJECT_ID in your environment before running the dashboard.")
-    st.stop()
 
-client = bigquery.Client(project=project_id)
-
-@st.cache_data(ttl=1800)
-def run_query(query: str) -> pd.DataFrame:
-    return client.query(query).to_dataframe()
-
-def safe_query(query: str) -> pd.DataFrame | None:
-    """Run a query, returning None if the table does not exist."""
+def _snapshot_is_fresh() -> bool:
+    """Return True if parquet snapshots exist and were exported today."""
+    meta_path = DATA_DIR / "meta.json"
+    if not meta_path.exists():
+        return False
     try:
-        return run_query(query)
+        meta = json.loads(meta_path.read_text())
+        return meta.get("exported_date") == date.today().isoformat()
     except Exception:
-        return None
+        return False
+
+
+def _load_parquet(name: str) -> pd.DataFrame | None:
+    path = DATA_DIR / f"{name}.parquet"
+    if path.exists():
+        return pd.read_parquet(path)
+    return None
+
+
+_use_snapshots = (DASHBOARD_MODE == "cloud") or _snapshot_is_fresh()
+
+if _use_snapshots:
+    st.caption("Data source: embedded snapshot")
+
+    def load_df(name: str, _query: str = "") -> pd.DataFrame:
+        df = _load_parquet(name)
+        return df if df is not None else pd.DataFrame()
+
+    def load_optional_df(name: str, _query: str = "") -> pd.DataFrame | None:
+        return _load_parquet(name)
+else:
+    from google.cloud import bigquery
+
+    project_id = os.getenv("GCP_PROJECT_ID")
+    dataset = os.getenv("BQ_DATASET_ANALYTICS", "analytics")
+
+    if not project_id:
+        st.error("Set GCP_PROJECT_ID in your environment before running the dashboard.")
+        st.stop()
+
+    client = bigquery.Client(project=project_id)
+
+    @st.cache_data(ttl=1800)
+    def _run_query(query: str) -> pd.DataFrame:
+        return client.query(query).to_dataframe()
+
+    def load_df(_name: str, query: str = "") -> pd.DataFrame:
+        return _run_query(query)
+
+    def load_optional_df(_name: str, query: str = "") -> pd.DataFrame | None:
+        try:
+            return _run_query(query)
+        except Exception:
+            return None
 
 # ── Shared date range for Tile 1 ─────────────────────────────────────
-date_range = run_query(f"""
+_project = os.getenv("GCP_PROJECT_ID", "")
+_dataset = os.getenv("BQ_DATASET_ANALYTICS", "analytics")
+_streaming = os.getenv("BQ_DATASET_STREAMING", "streaming")
+
+date_range = load_df("date_range", f"""
     SELECT MIN(event_date) AS min_date, MAX(event_date) AS max_date
-    FROM `{project_id}.{dataset}.fact_concert`
+    FROM `{_project}.{_dataset}.fact_concert`
     WHERE source = 'ticketmaster'
 """)
 date_subtitle = ""
@@ -44,19 +91,19 @@ if not date_range.empty and date_range.iloc[0]["min_date"] is not None:
 
 # ── Data queries ─────────────────────────────────────────────────────
 
-df_repertoire = run_query(f"""
+df_repertoire = load_df("repertoire", f"""
     SELECT artist_name, primary_genre, concert_year, concert_count,
            unique_songs, total_song_performances
-    FROM `{project_id}.{dataset}.mart_artist_yearly_repertoire`
+    FROM `{_project}.{_dataset}.mart_artist_yearly_repertoire`
     WHERE artist_name IS NOT NULL
     ORDER BY artist_name, concert_year
     LIMIT 5000
 """)
 
-df_freshness = run_query(f"""
+df_freshness = load_df("freshness", f"""
     SELECT artist_name, primary_genre, concert_year, concert_count,
            unique_songs, first_time_songs, repeated_songs, freshness_pct
-    FROM `{project_id}.{dataset}.mart_artist_setlist_freshness`
+    FROM `{_project}.{_dataset}.mart_artist_setlist_freshness`
     WHERE artist_name IS NOT NULL
     ORDER BY artist_name, concert_year
     LIMIT 5000
@@ -65,19 +112,18 @@ df_freshness = run_query(f"""
 MIN_SHOWS = 5
 
 # ── Optional data: Spark artist similarity (production only) ─────────
-df_similarity = safe_query(f"""
+df_similarity = load_optional_df("similarity", f"""
     SELECT artist_a, artist_b, shared_venues, jaccard_similarity
-    FROM `{project_id}.{dataset}.spark_artist_similarity`
+    FROM `{_project}.{_dataset}.spark_artist_similarity`
     ORDER BY jaccard_similarity DESC
     LIMIT 5000
 """)
 
 # ── Optional data: Kafka live event stream ───────────────────────────
-streaming_dataset = os.getenv("BQ_DATASET_STREAMING", "streaming")
-df_live = safe_query(f"""
+df_live = load_optional_df("live_events", f"""
     SELECT event_id, event_name, artist_name, event_date, event_status,
            venue_name, city, country_code, observed_at, is_new
-    FROM `{project_id}.{streaming_dataset}.live_event_updates`
+    FROM `{_project}.{_streaming}.live_event_updates`
     ORDER BY observed_at DESC
     LIMIT 500
 """)
@@ -102,9 +148,9 @@ tile1, tile2 = st.columns(2)
 with tile1:
     st.subheader("Artist Touring Intensity")
 
-    df_1 = run_query(f"""
+    df_1 = load_df("touring_intensity", f"""
         SELECT artist_name, primary_genre, country, concert_count
-        FROM `{project_id}.{dataset}.mart_artist_touring_intensity`
+        FROM `{_project}.{_dataset}.mart_artist_touring_intensity`
         ORDER BY concert_count DESC
         LIMIT 500
     """)
