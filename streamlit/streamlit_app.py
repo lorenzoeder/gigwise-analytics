@@ -9,7 +9,8 @@ import streamlit as st
 
 st.set_page_config(page_title="GigWise Analytics", layout="wide")
 st.title("GigWise Analytics Dashboard")
-st.caption("Concert touring intensity and setlist evolution")
+st.caption("Concert touring intensity and setlist evolution  \n"
+           "Data Engineering Zoomcamp 2026 capstone project by Lorenzo Ederone")
 
 # ── Data loading: snapshot vs live ───────────────────────────────────
 # DASHBOARD_MODE=cloud  → parquet snapshots only, no BigQuery
