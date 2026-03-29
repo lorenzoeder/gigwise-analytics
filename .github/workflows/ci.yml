@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint Python
+        run: uvx ruff check .
+
+      - name: Validate dbt project
+        run: uv run dbt parse --project-dir dbt --profiles-dir dbt
+        env:
+          GCP_PROJECT_ID: ci-placeholder
+          BQ_DATASET_ANALYTICS: analytics
+          GCP_REGION: europe-west2
+
+      - name: Validate Terraform
+        uses: hashicorp/setup-terraform@v3
+      - run: terraform -chdir=terraform fmt -check
