@@ -113,6 +113,8 @@ Plus optional sections:
 
 ## Data Model
 
+**View dbt generated documentation at this site: [GigWise dbt generated docs](https://lorenzoeder.github.io/gigwise-analytics/)**
+
 ```mermaid
 flowchart TD
     R1[raw.ticketmaster_events] --> S1[stg_ticketmaster__events]

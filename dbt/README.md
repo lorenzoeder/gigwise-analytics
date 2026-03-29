@@ -1,5 +1,7 @@
 # dbt Transformation Layer
 
+**View dbt generated documentation at this site: [GigWise dbt generated docs](https://lorenzoeder.github.io/gigwise-analytics/)**
+
 dbt models transform raw API data from BigQuery `raw` into a star schema in `analytics`, powering the Streamlit dashboard and Parquet exports.
 
 ## Layer overview
