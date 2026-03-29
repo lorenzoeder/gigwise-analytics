@@ -21,31 +21,7 @@ An end-to-end data pipeline that ingests concert and setlist data from multiple 
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    TM[Ticketmaster API] --> DLT[dlt Ingestion]
-    SL[Setlist.fm API] --> DLT
-    MB[MusicBrainz API] --> DLT
-
-    subgraph Bruin[Bruin Orchestration DAG]
-        DLT --> RAW[(BigQuery raw)]
-        RAW --> QC[Quality Checks]
-        QC --> DBT[dbt Models]
-        DBT --> SPARK[PySpark Similarity]
-    end
-
-    DBT --> ANA[(BigQuery analytics)]
-    SPARK --> ANA
-    ANA --> ST[Streamlit Dashboard]
-
-    KE[Kestra Scheduler] -.->|daily 06:00 UTC| Bruin
-
-    TM -.->|polling| KP[Kafka Producer]
-    KP --> KF{{Redpanda}}
-    KF --> KC[Kafka Consumer]
-    KC --> BQSTR[(BigQuery streaming)]
-    BQSTR -.-> ST
-```
+![Project Architecture](images/gigwise-analytics-architecture.svg)
 
 **Data flow:** APIs → **dlt** (raw tables) → **Bruin** (orchestration) → **dbt** (staging → core → marts) → **Streamlit** (dashboard)
 
