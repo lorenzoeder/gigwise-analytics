@@ -10,7 +10,7 @@ An end-to-end data pipeline that ingests concert and setlist data from multiple 
 
 ---
 
-## What It Answers
+## Answering the following questions
 
 - **Which artists are currently touring most heavily** across the US, Canada, UK, Germany, and Italy?
 - **What genres dominate** the live touring landscape?

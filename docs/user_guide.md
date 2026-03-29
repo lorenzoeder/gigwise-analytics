@@ -72,13 +72,13 @@ gcloud services enable bigquery.googleapis.com storage.googleapis.com iam.google
 
 ---
 
-## 3. Get API Keys
+## 3. Get API Keys (all are free, with generous constraints)
 
 | API | Where to sign up | What it provides |
 |---|---|---|
-| Ticketmaster Discovery | https://developer.ticketmaster.com/ | Upcoming concert events |
-| Setlist.fm | https://api.setlist.fm/ | Historical setlists with songs played |
-| MusicBrainz | No API key needed | Artist metadata and genre tags (set a `User-Agent` string) |
+| Ticketmaster Discovery API | https://developer.ticketmaster.com/ | Upcoming concert events |
+| Setlist.fm API | https://api.setlist.fm/ | Historical setlists with songs played |
+| MusicBrainz API | https://musicbrainz.org/doc/MusicBrainz_API | Artist metadata and genre tags (set a `User-Agent` string) |
 
 ---
 
