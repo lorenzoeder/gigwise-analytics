@@ -161,9 +161,9 @@ run-streaming:
 		sleep 2; \
 	done && \
 	echo "Kafka broker is ready" && \
-	nohup uv run python kafka/consumer.py >> logs/consumer.log 2>&1 & \
+	nohup bash -c 'cd $(ROOT_DIR) && set -a && source .env && set +a && uv run python kafka/consumer.py' >> logs/consumer.log 2>&1 & \
 	sleep 3 && \
-	nohup uv run python kafka/producer.py >> logs/producer.log 2>&1 & \
+	nohup bash -c 'cd $(ROOT_DIR) && set -a && source .env && set +a && uv run python kafka/producer.py' >> logs/producer.log 2>&1 & \
 	sleep 2 && \
 	echo "Streaming started in background" && \
 	echo "  Producer log: logs/producer.log" && \
