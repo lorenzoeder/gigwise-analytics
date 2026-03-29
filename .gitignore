@@ -169,6 +169,7 @@ celerybeat.pid
 
 # Environments
 .env*
+!.env.example
 .envrc*
 .venv*
 .kestra-venv/

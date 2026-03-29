@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: kestra_app
       POSTGRES_USER: kestra
-      POSTGRES_PASSWORD: kestra
+      POSTGRES_PASSWORD: ${KESTRA_DB_PASSWORD:-kestra}
     volumes:
       - kestra-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -35,7 +35,7 @@ services:
             url: jdbc:postgresql://kestra-postgres:5432/kestra_app
             driverClassName: org.postgresql.Driver
             username: kestra
-            password: kestra
+            password: ${KESTRA_DB_PASSWORD:-kestra}
         kestra:
           repository:
             type: postgres

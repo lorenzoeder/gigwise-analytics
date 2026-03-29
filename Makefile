@@ -3,7 +3,7 @@ MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 ROOT_DIR := $(dir $(MAKEFILE_PATH))
 DBT_BUILD_FLAGS ?= --fail-fast
 
-.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra wipe-ingestion wipe-all run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug export-dashboard-data run-dashboard run-dashboard-logs stop-dashboard run-spark run-streaming stop-streaming test lint fmt
+.PHONY: help env-check gcp-auth-check bruin-check setup-infra destroy-infra wipe-ingestion wipe-all run-dlt run-dlt-dry run-bruin run-bruin-dry run-dbt run-dbt-debug generate-dbt-docs export-dashboard-data run-dashboard run-dashboard-logs stop-dashboard run-spark run-streaming stop-streaming test lint fmt
 
 help:
 	@echo "Available targets:"
@@ -20,6 +20,7 @@ help:
 	@echo "  run-bruin-dry   Validate Bruin pipeline only (no execution)"
 	@echo "  run-dbt-debug   Validate dbt profile/connection"
 	@echo "  run-dbt         Run dbt models and tests (incremental by default; full refresh: make run-dbt DBT_BUILD_FLAGS='--full-refresh --fail-fast')"
+	@echo "  generate-dbt-docs  Regenerate dbt docs site into dbt/docs/"
 	@echo "  run-dashboard   Start Streamlit dashboard (background, logs to logs/dashboard.log)"
 	@echo "  run-dashboard-logs     Tail Streamlit dashboard logs"
 	@echo "  stop-dashboard         Stop background Streamlit process"
@@ -118,6 +119,11 @@ run-dbt-debug:
 run-dbt:
 	$(MAKE) -f $(MAKEFILE_PATH) run-dbt-debug
 	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt && uv run dbt deps && uv run dbt build --target prod $(DBT_BUILD_FLAGS)
+
+generate-dbt-docs:
+	cd $(ROOT_DIR) && set -a && source .env && set +a && cd dbt && \
+	uv run dbt docs generate --target prod --no-partial-parse && \
+	mkdir -p docs && cp target/index.html target/manifest.json target/catalog.json docs/
 
 export-dashboard-data:
 	cd $(ROOT_DIR) && set -a && source .env && set +a && \

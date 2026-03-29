@@ -29,11 +29,13 @@ models:
       - name: source
         tests:
           - accepted_values:
-              values: ['ticketmaster', 'setlistfm']
+              arguments:
+                values: ['ticketmaster', 'setlistfm']
       - name: artist_id
         tests:
           - relationships:
-              to: ref('dim_artist')
-              field: artist_id
+              arguments:
+                to: ref('dim_artist')
+                field: artist_id
               config:
                 where: "artist_id IS NOT NULL"

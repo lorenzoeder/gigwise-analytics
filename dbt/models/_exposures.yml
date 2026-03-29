@@ -1,0 +1,19 @@
+version: 2
+
+exposures:
+  - name: streamlit_dashboard
+    type: dashboard
+    maturity: medium
+    description: >
+      GigWise Analytics Streamlit dashboard — touring intensity, setlist
+      evolution, and repertoire analysis. Runs in two modes: live BigQuery
+      queries (local) or pre-exported Parquet snapshots (Streamlit Cloud).
+    url: https://gigwise.streamlit.app
+    owner:
+      name: Lorenzo Ederone
+      email: 122997824+lorenzoeder@users.noreply.github.com
+    depends_on:
+      - ref('fact_concert')
+      - ref('mart_artist_touring_intensity')
+      - ref('mart_artist_yearly_repertoire')
+      - ref('mart_artist_setlist_freshness')

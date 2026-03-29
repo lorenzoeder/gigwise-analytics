@@ -16,6 +16,7 @@ models:
     intermediate:
       +materialized: view
     core:
-      +materialized: table
+      +materialized: incremental
+      +on_schema_change: sync_all_columns
     marts:
       +materialized: view

@@ -2,7 +2,13 @@
   config(
     materialized='incremental',
     unique_key='concert_id',
-    on_schema_change='sync_all_columns'
+    on_schema_change='sync_all_columns',
+    partition_by={
+      'field': 'event_date',
+      'data_type': 'date',
+      'granularity': 'month'
+    },
+    cluster_by=['artist_id']
   )
 }}
 
