@@ -27,7 +27,7 @@ jobs:
         run: uvx ruff check .
 
       - name: Validate dbt project
-        run: uv run dbt parse --project-dir dbt --profiles-dir dbt
+        run: uv run dbt deps --project-dir dbt --profiles-dir dbt && uv run dbt parse --project-dir dbt --profiles-dir dbt
         env:
           GCP_PROJECT_ID: ci-placeholder
           BQ_DATASET_ANALYTICS: analytics
