@@ -20,8 +20,8 @@ resource "google_storage_bucket" "data_lake" {
 
   lifecycle_rule {
     condition {
-      age                = 7
-      with_state         = "ARCHIVED"
+      age        = 7
+      with_state = "ARCHIVED"
     }
     action {
       type = "Delete"
