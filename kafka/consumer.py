@@ -12,11 +12,9 @@ import json
 import os
 import signal
 import sys
-import time
 from pathlib import Path
 
 from kafka import KafkaConsumer
-from pathlib import Path
 
 # BigQuery table schema for auto-creation
 _TABLE_SCHEMA = [

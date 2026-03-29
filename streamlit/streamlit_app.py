@@ -270,7 +270,7 @@ with tile1:
 
         m1, m2, m3 = st.columns(3)
         total_events = df_live["event_id"].nunique()
-        new_events = df_live[df_live["is_new"] == True]["event_id"].nunique()
+        new_events = df_live[df_live["is_new"]]["event_id"].nunique()
         latest_ts = df_live["observed_at"].max()
 
         m1.metric("Events Tracked", f"{total_events:,}")
