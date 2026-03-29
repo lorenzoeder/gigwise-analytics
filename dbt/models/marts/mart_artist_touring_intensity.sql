@@ -7,6 +7,7 @@ FROM {{ ref('fact_concert') }} f
 LEFT JOIN {{ ref('dim_artist') }} d
   ON f.artist_id = d.artist_id
 WHERE f.source = 'ticketmaster'
+  AND f.event_date >= CURRENT_DATE()
   AND f.artist_id IS NOT NULL
   AND f.artist_name IS NOT NULL
 GROUP BY 1, 2, 3

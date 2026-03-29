@@ -17,6 +17,13 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str]) -> None:
     subprocess.run(cmd, check=True, cwd=cwd, env=env)
 
 
+def _fix_dbt_packages_ownership(dbt_dir: Path) -> None:
+    """Make dbt_packages world-writable so both root (Kestra) and local user can manage it."""
+    pkgs = dbt_dir / "dbt_packages"
+    if pkgs.exists() and os.getuid() == 0:
+        subprocess.run(["chmod", "-R", "a+rwX", str(pkgs)], check=False)
+
+
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     dbt_dir = repo_root / "dbt"
@@ -31,6 +38,7 @@ def main() -> None:
         cwd=dbt_dir,
         env=env,
     )
+    _fix_dbt_packages_ownership(dbt_dir)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ def main() -> None:
             SELECT MIN(event_date) AS min_date, MAX(event_date) AS max_date
             FROM `{project_id}.{dataset}.fact_concert`
             WHERE source = 'ticketmaster'
+              AND event_date >= CURRENT_DATE()
         """,
         "touring_intensity": f"""
             SELECT artist_name, primary_genre, country, concert_count

@@ -40,8 +40,18 @@ def _load_parquet(name: str) -> pd.DataFrame | None:
 
 _use_snapshots = (DASHBOARD_MODE == "cloud") or _snapshot_is_fresh()
 
+_snapshot_date: str | None = None
 if _use_snapshots:
-    st.caption("Data source: embedded snapshot")
+    _meta_path = DATA_DIR / "meta.json"
+    if _meta_path.exists():
+        try:
+            _snapshot_date = json.loads(_meta_path.read_text()).get("exported_date")
+        except Exception:
+            pass
+    _snap_label = "Data source: embedded snapshot"
+    if _snapshot_date:
+        _snap_label += f", last refreshed on {_snapshot_date}"
+    st.caption(_snap_label)
 
     def load_df(name: str, _query: str = "") -> pd.DataFrame:
         df = _load_parquet(name)
@@ -83,6 +93,7 @@ date_range = load_df("date_range", f"""
     SELECT MIN(event_date) AS min_date, MAX(event_date) AS max_date
     FROM `{_project}.{_dataset}.fact_concert`
     WHERE source = 'ticketmaster'
+      AND event_date >= CURRENT_DATE()
 """)
 date_subtitle = ""
 if not date_range.empty and date_range.iloc[0]["min_date"] is not None:
